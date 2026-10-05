@@ -4,7 +4,8 @@ import { prisma } from "@/lib/prisma";
 import { resetPasswordSchema } from "@/lib/validations/auth";
 import { hashPassword } from "@/lib/auth";
 import { successResponse, errorResponse } from "@/lib/api-response";
-import { BadRequestError, UnauthorizedError, NotFoundError } from "@/lib/errors";
+import { BadRequestError, UnauthorizedError, NotFoundError, ForbiddenError } from "@/lib/errors";
+import { checkRateLimit } from "@/lib/rate-limit";
 import { AuditService } from "@/services/audit-service";
 
 const JWT_SECRET = new TextEncoder().encode(
@@ -13,6 +14,14 @@ const JWT_SECRET = new TextEncoder().encode(
 
 export async function POST(req: NextRequest) {
   try {
+    const ip = req.headers.get("x-forwarded-for") || "127.0.0.1";
+    const rateCheck = checkRateLimit(`reset-password:${ip}`, { limit: 10, windowMs: 15 * 60 * 1000 });
+    if (!rateCheck.allowed) {
+      throw new ForbiddenError(
+        `Too many password reset attempts. Please try again in ${rateCheck.resetInSec} seconds.`
+      );
+    }
+
     const body = await req.json();
     const parseResult = resetPasswordSchema.safeParse(body);
     if (!parseResult.success) {

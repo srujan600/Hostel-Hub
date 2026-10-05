@@ -3,7 +3,8 @@ import { SignJWT } from "jose";
 import { prisma } from "@/lib/prisma";
 import { forgotPasswordSchema } from "@/lib/validations/auth";
 import { successResponse, errorResponse } from "@/lib/api-response";
-import { BadRequestError } from "@/lib/errors";
+import { BadRequestError, ForbiddenError } from "@/lib/errors";
+import { checkRateLimit } from "@/lib/rate-limit";
 import { AuditService } from "@/services/audit-service";
 import { logger } from "@/lib/logger";
 
@@ -13,6 +14,14 @@ const JWT_SECRET = new TextEncoder().encode(
 
 export async function POST(req: NextRequest) {
   try {
+    const ip = req.headers.get("x-forwarded-for") || "127.0.0.1";
+    const rateCheck = checkRateLimit(`forgot-password:${ip}`, { limit: 5, windowMs: 15 * 60 * 1000 });
+    if (!rateCheck.allowed) {
+      throw new ForbiddenError(
+        `Too many password reset requests from this network. Please try again in ${rateCheck.resetInSec} seconds.`
+      );
+    }
+
     const body = await req.json();
     const parseResult = forgotPasswordSchema.safeParse(body);
     if (!parseResult.success) {

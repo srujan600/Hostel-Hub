@@ -51,6 +51,7 @@ export async function GET(req: NextRequest) {
           },
         },
         comments: {
+          where: session.role === "STUDENT" ? { isInternal: false } : undefined,
           orderBy: { createdAt: "asc" },
         },
       },

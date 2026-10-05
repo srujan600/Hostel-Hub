@@ -53,6 +53,8 @@ export async function GET(
       if (complaint.studentId !== student?.id) {
         throw new ForbiddenError("You do not have access to view this complaint");
       }
+      // Security hardening: filter out internal staff notes from student view
+      complaint.comments = complaint.comments.filter((c: any) => !c.isInternal);
     }
 
     return successResponse(complaint);
