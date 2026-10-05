@@ -1,0 +1,108 @@
+import type { Config } from "tailwindcss";
+
+const config: Config = {
+  darkMode: "class",
+  content: [
+    "./src/pages/**/*.{js,ts,jsx,tsx,mdx}",
+    "./src/components/**/*.{js,ts,jsx,tsx,mdx}",
+    "./src/app/**/*.{js,ts,jsx,tsx,mdx}",
+  ],
+  theme: {
+    extend: {
+      colors: {
+        primary: {
+          DEFAULT: "#00236f",
+          container: "#1e3a8a",
+          "fixed-dim": "#b6c4ff",
+          fixed: "#dce1ff",
+        },
+        "on-primary": "#ffffff",
+        "on-primary-container": "#90a8ff",
+        "on-primary-fixed": "#00164e",
+        "on-primary-fixed-variant": "#264191",
+        secondary: {
+          DEFAULT: "#0051d5",
+          container: "#316bf3",
+          fixed: "#dbe1ff",
+          "fixed-dim": "#b4c5ff",
+        },
+        "on-secondary": "#ffffff",
+        "on-secondary-container": "#fefcff",
+        "on-secondary-fixed": "#00174b",
+        "on-secondary-fixed-variant": "#003ea8",
+        tertiary: {
+          DEFAULT: "#442100",
+          container: "#653400",
+          fixed: "#ffdcc3",
+          "fixed-dim": "#ffb77d",
+        },
+        "on-tertiary": "#ffffff",
+        "on-tertiary-container": "#fc922b",
+        "on-tertiary-fixed": "#2f1500",
+        "on-tertiary-fixed-variant": "#6e3900",
+        surface: {
+          DEFAULT: "#faf8ff",
+          dim: "#d2d9f4",
+          bright: "#faf8ff",
+          variant: "#dae2fd",
+          "container-lowest": "#ffffff",
+          "container-low": "#f2f3ff",
+          container: "#eaedff",
+          "container-high": "#e2e7ff",
+          "container-highest": "#dae2fd",
+          tint: "#4059aa",
+        },
+        "on-surface": "#131b2e",
+        "on-surface-variant": "#444651",
+        "inverse-surface": "#283044",
+        "inverse-on-surface": "#eef0ff",
+        outline: {
+          DEFAULT: "#757682",
+          variant: "#c5c5d3",
+        },
+        error: {
+          DEFAULT: "#ba1a1a",
+          container: "#ffdad6",
+        },
+        "on-error": "#ffffff",
+        "on-error-container": "#93000a",
+        background: "#faf8ff",
+        "on-background": "#131b2e",
+      },
+      borderRadius: {
+        DEFAULT: "0.25rem",
+        sm: "0.125rem",
+        md: "0.375rem",
+        lg: "0.5rem",
+        xl: "0.75rem",
+        "2xl": "1rem",
+        full: "9999px",
+      },
+      spacing: {
+        gutter: "1.5rem",
+        "gutter-compact": "0.75rem",
+        margin: "2rem",
+        "margin-mobile": "1rem",
+        "space-xs": "0.25rem",
+        "space-sm": "0.5rem",
+        "space-md": "1rem",
+        "space-lg": "1.5rem",
+        "space-xl": "2.5rem",
+      },
+      fontFamily: {
+        sans: ["var(--font-inter)", "Inter", "sans-serif"],
+        heading: ["var(--font-jakarta)", "Plus Jakarta Sans", "sans-serif"],
+      },
+      boxShadow: {
+        tactile: "0 2px 0 #1e3a8a, inset 0 1px 0 rgba(255, 255, 255, 0.2)",
+        "tactile-emerald": "0 2px 0 #065f46, inset 0 1px 0 rgba(255, 255, 255, 0.25)",
+        "tactile-subtle": "0 1px 2px rgba(15, 23, 42, 0.08)",
+        card: "0 1px 3px rgba(15, 23, 42, 0.05), 0 1px 2px rgba(15, 23, 42, 0.03)",
+        elevated: "0 8px 24px -4px rgba(15, 23, 42, 0.08), 0 3px 6px -2px rgba(15, 23, 42, 0.04)",
+      },
+    },
+  },
+  plugins: [],
+};
+
+export default config;
