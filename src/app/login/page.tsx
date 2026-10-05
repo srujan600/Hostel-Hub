@@ -28,28 +28,25 @@ interface Slide {
 
 const SLIDES: Slide[] = [
   {
-    image:
-      "https://images.unsplash.com/photo-1541339907198-e08756dedf3f?auto=format&fit=crop&w=1600&q=80",
-    headline: "Collegiate Dignity & Operational Rigor",
+    image: "/images/mlrit/mlrit-main-campus.jpg",
+    headline: "Collegiate Excellence & Autonomous Legacy",
     subtext:
-      "HostelHub bridges heritage campus residential traditions with automated access control, maintenance, and 24/7 student care.",
-    tag: "CAMPUS RESIDENTIAL OS",
+      "MLR Institute of Technology bridges premier academic innovation with automated residential life, access control, and 24/7 student care.",
+    tag: "MLR INSTITUTE OF TECHNOLOGY",
   },
   {
-    image:
-      "https://images.unsplash.com/photo-1523240795612-9a054b0db644?auto=format&fit=crop&w=1600&q=80",
-    headline: "Transparent Student Welfare & Living",
+    image: "/images/mlrit/mlrit-hostel-residence.jpg",
+    headline: "Comfortable, Secure & Modern Student Hostels",
     subtext:
-      "Instant out-pass adjudication, direct warden escalation, dietary schedules, and secure guest registry in one reliable portal.",
-    tag: "RESIDENT LIFE",
+      "Separate boys and girls residential blocks, high-speed Wi-Fi, hygienic mess dining, and instant out-pass approvals in one unified portal.",
+    tag: "STUDENT RESIDENTIAL HOUSING",
   },
   {
-    image:
-      "https://images.unsplash.com/photo-1562774053-701939374585?auto=format&fit=crop&w=1600&q=80",
-    headline: "Mission-Critical Facility Oversight",
+    image: "/images/mlrit/mlrit-sports-arena.jpg",
+    headline: "World-Class Infrastructure & Sports Arena",
     subtext:
-      "Real-time bed occupancy telemetry, floor audits, scheduled turnstile curfews, and transactional room allocation.",
-    tag: "WARDEN COMMAND DESK",
+      "26,000 sq.ft indoor stadium, Olympic-grade badminton academy, expansive athletic grounds, and collaborative living spaces.",
+    tag: "CAMPUS LIFE & ATHLETICS",
   },
 ];
 
