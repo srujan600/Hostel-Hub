@@ -69,6 +69,7 @@ export function Sidebar({ role = "STUDENT", isOpen = false, onClose }: SidebarPr
     { label: "Room Allocations", href: "/admin/allocations", icon: <Grid className="w-4 h-4" /> },
     { label: "Student Master", href: "/admin/students", icon: <Users className="w-4 h-4" /> },
     { label: "Staff & Wardens", href: "/admin/staff", icon: <Shield className="w-4 h-4" /> },
+    { label: "Institutional Reports", href: "/admin/reports", icon: <FileText className="w-4 h-4" /> },
     { label: "Audit Log Trail", href: "/admin/audit-logs", icon: <History className="w-4 h-4" /> },
     { label: "System Settings", href: "/admin/settings", icon: <Settings className="w-4 h-4" /> },
   ];
