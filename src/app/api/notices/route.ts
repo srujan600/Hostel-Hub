@@ -9,15 +9,26 @@ export async function GET(req: NextRequest) {
     const { searchParams } = new URL(req.url);
     const priority = searchParams.get("priority");
 
+    const now = new Date();
     const whereClause: any = {
       isPublished: true,
+      AND: [
+        {
+          OR: [
+            { expiryDate: null },
+            { expiryDate: { gte: now } },
+          ],
+        },
+      ],
     };
 
     if (session.role === "STUDENT") {
-      whereClause.OR = [
-        { targetAudience: "ALL" },
-        { targetAudience: "STUDENTS" },
-      ];
+      whereClause.AND.push({
+        OR: [
+          { targetAudience: "ALL" },
+          { targetAudience: "STUDENTS" },
+        ],
+      });
     }
 
     if (priority && priority !== "ALL") {

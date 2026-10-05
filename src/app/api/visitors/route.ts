@@ -86,8 +86,22 @@ export async function POST(req: NextRequest) {
     const passCode = `VP-2026-${String(passCount + 1).padStart(4, "0")}`;
 
     const dateVal = visitDate ? new Date(visitDate) : new Date();
-    const entryVal = expectedEntryTime ? new Date(expectedEntryTime) : new Date();
-    const exitVal = expectedExitTime ? new Date(expectedExitTime) : new Date(Date.now() + 3 * 60 * 60 * 1000);
+    
+    const parseTime = (timeStr?: string, fallback: Date = new Date()): Date => {
+      if (!timeStr) return fallback;
+      const parsed = new Date(timeStr);
+      if (!isNaN(parsed.getTime())) return parsed;
+      if (typeof timeStr === "string" && timeStr.includes(":")) {
+        const [hours, minutes] = timeStr.split(":").map(Number);
+        const d = new Date(dateVal);
+        d.setHours(isNaN(hours) ? 0 : hours, isNaN(minutes) ? 0 : minutes, 0, 0);
+        if (!isNaN(d.getTime())) return d;
+      }
+      return fallback;
+    };
+
+    const entryVal = parseTime(expectedEntryTime, new Date());
+    const exitVal = parseTime(expectedExitTime, new Date(entryVal.getTime() + 3 * 60 * 60 * 1000));
 
     const pass = await prisma.visitorPass.create({
       data: {
@@ -96,8 +110,8 @@ export async function POST(req: NextRequest) {
         visitDate: dateVal,
         expectedEntryTime: entryVal,
         expectedExitTime: exitVal,
-        status: "APPROVED", // Auto-approved for recognized family/guest or pending
-        remarks: "Online student pre-registration",
+        status: session.role === "STUDENT" ? "PENDING" : "APPROVED",
+        remarks: "Online pre-registration",
       },
     });
 

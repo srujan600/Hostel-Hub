@@ -77,6 +77,12 @@ export async function POST(req: NextRequest) {
     const start = new Date(startDate);
     const end = new Date(endDate);
 
+    // Business Rule: Departure date cannot be in the past (allowing 15m clock skew)
+    const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000);
+    if (start < fifteenMinutesAgo) {
+      throw new BadRequestError("Departure date cannot be in the past");
+    }
+
     // Critical Business Rule: Prevent conflicting active leave requests
     const conflictingRequest = await prisma.leaveRequest.findFirst({
       where: {
