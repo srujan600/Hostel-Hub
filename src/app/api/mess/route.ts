@@ -2,7 +2,7 @@ import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/auth";
 import { successResponse, errorResponse } from "@/lib/api-response";
-import { BadRequestError, NotFoundError } from "@/lib/errors";
+import { BadRequestError, NotFoundError, ForbiddenError } from "@/lib/errors";
 
 export async function GET(req: NextRequest) {
   try {
@@ -64,3 +64,43 @@ export async function POST(req: NextRequest) {
     return errorResponse(error);
   }
 }
+
+export async function PUT(req: NextRequest) {
+  try {
+    const session = await requireAuth(req);
+    if (session.role !== "WARDEN" && session.role !== "ADMIN" && session.role !== "SUPER_ADMIN") {
+      throw new ForbiddenError("Forbidden: Staff authorization required to edit mess menu");
+    }
+
+    const body = await req.json();
+    const { dayOfWeek, mealType, items, timings } = body;
+
+    if (!dayOfWeek || !mealType || !items) {
+      throw new BadRequestError("Day of week, meal type, and items are required");
+    }
+
+    const updated = await prisma.messMenu.upsert({
+      where: {
+        dayOfWeek_mealType: {
+          dayOfWeek,
+          mealType,
+        },
+      },
+      update: {
+        items: items.trim(),
+        timings: timings ? timings.trim() : undefined,
+      },
+      create: {
+        dayOfWeek,
+        mealType,
+        items: items.trim(),
+        timings: timings ? timings.trim() : "08:00 - 10:00 AM",
+      },
+    });
+
+    return successResponse(updated);
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+

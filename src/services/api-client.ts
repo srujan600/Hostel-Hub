@@ -31,6 +31,15 @@ class ApiClient {
     return this.handleResponse<T>(response);
   }
 
+  async put<T>(url: string, body?: any): Promise<ApiResponse<T>> {
+    const response = await fetch(url, {
+      method: "PUT",
+      headers: this.getHeaders(),
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    return this.handleResponse<T>(response);
+  }
+
   async patch<T>(url: string, body?: any): Promise<ApiResponse<T>> {
     const response = await fetch(url, {
       method: "PATCH",

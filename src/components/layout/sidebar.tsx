@@ -73,9 +73,15 @@ export function Sidebar({ role = "STUDENT", isOpen = false, onClose }: SidebarPr
     { label: "System Settings", href: "/admin/settings", icon: <Settings className="w-4 h-4" /> },
   ];
 
+  const securityNav: NavItem[] = [
+    { label: "Gate Control Center", href: "/security/dashboard", icon: <Shield className="w-4 h-4" /> },
+    { label: "Visitor Passes", href: "/security/visitors", icon: <Users className="w-4 h-4" /> },
+  ];
+
   let currentNav = studentNav;
   if (role === "WARDEN") currentNav = wardenNav;
   if (role === "ADMIN" || role === "SUPER_ADMIN") currentNav = adminNav;
+  if (role === "SECURITY") currentNav = securityNav;
 
   return (
     <>
@@ -96,7 +102,13 @@ export function Sidebar({ role = "STUDENT", isOpen = false, onClose }: SidebarPr
         <div className="p-3 space-y-1">
           {/* Header Tag */}
           <div className="px-3 py-2 text-[10px] font-mono uppercase tracking-wider text-slate-400 font-semibold">
-            {role === "STUDENT" ? "Resident Portal v4.2" : role === "WARDEN" ? "Operational Terminal v4.2" : "Institutional Console v4.2"}
+            {role === "STUDENT"
+              ? "Resident Portal v4.2"
+              : role === "WARDEN"
+              ? "Operational Terminal v4.2"
+              : role === "SECURITY"
+              ? "Security Gate Post v4.2"
+              : "Institutional Console v4.2"}
           </div>
 
           {/* Navigation Links */}
