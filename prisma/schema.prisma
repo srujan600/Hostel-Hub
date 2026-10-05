@@ -1,0 +1,425 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// 1. User & Authentication
+model User {
+  id           String         @id @default(cuid())
+  username     String         @unique
+  email        String         @unique
+  passwordHash String
+  role         String         @default("STUDENT") // STUDENT, WARDEN, ADMIN, SUPER_ADMIN, SECURITY
+  status       String         @default("ACTIVE")  // ACTIVE, INACTIVE, SUSPENDED
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  student      Student?
+  staff        Staff?
+  notifications Notification[]
+
+  @@index([username])
+  @@index([role])
+}
+
+// 2. Role Entity
+model RoleEntity {
+  id          String   @id @default(cuid())
+  code        String   @unique // STUDENT, WARDEN, ADMIN, SUPER_ADMIN, SECURITY
+  name        String
+  description String?
+  permissions String   // JSON array of permission keys
+  createdAt   DateTime @default(now())
+}
+
+// 3. Student Profile
+model Student {
+  id                    String           @id @default(cuid())
+  userId                String           @unique
+  studentId             String           @unique // e.g. STU-2026-0042
+  name                  String
+  email                 String           @unique
+  phone                 String
+  course                String           // e.g. B.Tech Computer Science
+  department            String           // e.g. School of Engineering
+  yearOfStudy           Int              @default(1)
+  gender                String           // MALE, FEMALE, OTHER
+  emergencyContactName  String
+  emergencyContactPhone String
+  address               String?
+  status                String           @default("ACTIVE") // ACTIVE, GRADUATED, SUSPENDED
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+
+  user                  User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  allocations           RoomAllocation[]
+  complaints            Complaint[]
+  leaveRequests         LeaveRequest[]
+  visitors              Visitor[]
+  attendanceRecords     Attendance[]
+  feedbacks             Feedback[]
+
+  @@index([studentId])
+  @@index([course])
+}
+
+// 4. Staff Profile (Wardens, Admins, Security)
+model Staff {
+  id               String       @id @default(cuid())
+  userId           String       @unique
+  employeeId       String       @unique // e.g. WDN-101, SEC-201
+  name             String
+  email            String       @unique
+  phone            String
+  role             String       // WARDEN, ADMIN, SUPER_ADMIN, SECURITY
+  designation      String       // e.g. Senior Hostel Warden, Chief Administrator
+  assignedHostelId String?
+  status           String       @default("ACTIVE")
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  user             User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  assignedHostel   Hostel?      @relation(fields: [assignedHostelId], references: [id])
+  assignedComplaints Complaint[]
+
+  @@index([employeeId])
+  @@index([role])
+}
+
+// 5. Hostel
+model Hostel {
+  id            String    @id @default(cuid())
+  code          String    @unique // e.g. H-NORTH-01
+  name          String    // e.g. St. Jude Hall of Residence
+  description   String?
+  address       String?
+  genderType    String    @default("CO_ED") // MALE, FEMALE, CO_ED
+  totalBlocks   Int       @default(0)
+  totalRooms    Int       @default(0)
+  totalCapacity Int       @default(0)
+  status        String    @default("ACTIVE")
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  blocks        Block[]
+  staffMembers  Staff[]
+}
+
+// 6. Block
+model Block {
+  id          String   @id @default(cuid())
+  hostelId    String
+  code        String   // e.g. BLK-C
+  name        String   // e.g. Block C - North Wing
+  totalFloors Int      @default(0)
+  totalRooms  Int      @default(0)
+  status      String   @default("ACTIVE")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  hostel      Hostel   @relation(fields: [hostelId], references: [id], onDelete: Cascade)
+  floors      Floor[]
+
+  @@unique([hostelId, code])
+}
+
+// 7. Floor
+model Floor {
+  id          String   @id @default(cuid())
+  blockId     String
+  floorNumber Int      // 0 = Ground, 1, 2, 3...
+  name        String   // e.g. 2nd Floor
+  totalRooms  Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  block       Block    @relation(fields: [blockId], references: [id], onDelete: Cascade)
+  rooms       Room[]
+
+  @@unique([blockId, floorNumber])
+}
+
+// 8. Room
+model Room {
+  id           String   @id @default(cuid())
+  floorId      String
+  roomNumber   String   // e.g. 204, 301
+  roomType     String   @default("DOUBLE") // SINGLE, DOUBLE, TRIPLE, QUAD
+  capacity     Int      @default(2)
+  occupiedBeds Int      @default(0)
+  status       String   @default("ACTIVE") // ACTIVE, UNDER_MAINTENANCE
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  floor        Floor    @relation(fields: [floorId], references: [id], onDelete: Cascade)
+  beds         Bed[]
+
+  @@unique([floorId, roomNumber])
+  @@index([roomNumber])
+}
+
+// 9. Bed
+model Bed {
+  id          String           @id @default(cuid())
+  roomId      String
+  bedNumber   String           // e.g. A, B, C, D
+  status      String           @default("AVAILABLE") // AVAILABLE, OCCUPIED, MAINTENANCE, RESERVED
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  room        Room             @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  allocations RoomAllocation[]
+
+  @@unique([roomId, bedNumber])
+}
+
+// 10. Room Allocation
+model RoomAllocation {
+  id           String    @id @default(cuid())
+  studentId    String
+  bedId        String
+  academicYear String    // e.g. 2026-2027
+  allocatedAt  DateTime  @default(now())
+  vacatedAt    DateTime?
+  status       String    @default("ACTIVE") // ACTIVE, TRANSFERRED, VACATED
+  remarks      String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  student      Student   @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  bed          Bed       @relation(fields: [bedId], references: [id], onDelete: Cascade)
+
+  @@index([studentId, status])
+  @@index([bedId, status])
+}
+
+// 11. Complaint
+model Complaint {
+  id              String             @id @default(cuid())
+  complaintCode   String             @unique // e.g. CMP-2026-0012
+  studentId       String
+  category        String             // ELECTRICAL, PLUMBING, CARPENTRY, CLEANLINESS, INTERNET_WIFI, MESS_FOOD, DISCIPLINE, SECURITY, OTHER
+  title           String
+  description     String
+  location        String             // e.g. Block C, Room 204
+  priority        String             @default("MEDIUM") // LOW, MEDIUM, HIGH, URGENT
+  status          String             @default("SUBMITTED") // SUBMITTED, ASSIGNED, IN_PROGRESS, RESOLVED, CLOSED
+  assignedStaffId String?
+  attachmentUrl   String?
+  resolvedAt      DateTime?
+  closedAt        DateTime?
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  student         Student            @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  assignedStaff   Staff?             @relation(fields: [assignedStaffId], references: [id])
+  comments        ComplaintComment[]
+
+  @@index([studentId, status])
+  @@index([assignedStaffId, status])
+  @@index([status])
+}
+
+// 12. Complaint Comment
+model ComplaintComment {
+  id          String    @id @default(cuid())
+  complaintId String
+  authorId    String
+  authorRole  String    // STUDENT, WARDEN, ADMIN, STAFF
+  authorName  String
+  comment     String
+  isInternal  Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+
+  complaint   Complaint @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+
+  @@index([complaintId])
+}
+
+// 13. Leave & Outing Request
+model LeaveRequest {
+  id               String    @id @default(cuid())
+  requestCode      String    @unique // e.g. LEV-2026-0089
+  studentId        String
+  leaveType        String    @default("DAY_OUTING") // DAY_OUTING, OVERNIGHT, VACATION, EMERGENCY
+  startDate        DateTime
+  endDate          DateTime
+  reason           String
+  destination      String
+  emergencyContact String
+  status           String    @default("SUBMITTED") // DRAFT, SUBMITTED, APPROVED, REJECTED, COMPLETED
+  reviewedById     String?
+  reviewedAt       DateTime?
+  reviewRemarks    String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  student          Student   @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@index([studentId, status])
+  @@index([status])
+  @@index([startDate, endDate])
+}
+
+// 14. Visitor Profile
+model Visitor {
+  id            String        @id @default(cuid())
+  studentId     String
+  name          String
+  phone         String
+  relationship  String        // PARENT, SIBLING, RELATIVE, GUARDIAN, FRIEND
+  idProofType   String?       // NATIONAL_ID, PASSPORT, DRIVERS_LICENSE
+  idProofNumber String?
+  address       String?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  student       Student       @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  passes        VisitorPass[]
+
+  @@index([studentId])
+}
+
+// 15. Visitor Pass
+model VisitorPass {
+  id                String    @id @default(cuid())
+  visitorId         String
+  passCode          String    @unique // e.g. VP-2026-0512
+  visitDate         DateTime
+  expectedEntryTime DateTime
+  expectedExitTime  DateTime
+  actualEntryTime   DateTime?
+  actualExitTime    DateTime?
+  status            String    @default("PENDING") // PENDING, APPROVED, CHECKED_IN, CHECKED_OUT, REJECTED, EXPIRED
+  approvedById      String?
+  remarks           String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  visitor           Visitor   @relation(fields: [visitorId], references: [id], onDelete: Cascade)
+
+  @@index([visitorId])
+  @@index([status])
+  @@index([visitDate])
+}
+
+// 16. Attendance
+model Attendance {
+  id            String    @id @default(cuid())
+  studentId     String
+  date          String    // YYYY-MM-DD
+  status        String    @default("PRESENT") // PRESENT, ABSENT, LATE, EXCUSED
+  markedById    String
+  remarks       String?
+  isCorrected   Boolean   @default(false)
+  correctedById String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  student       Student   @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, date])
+  @@index([date, status])
+}
+
+// 17. Notice & Announcement
+model Notice {
+  id             String    @id @default(cuid())
+  noticeCode     String    @unique // e.g. NOT-2026-003
+  title          String
+  content        String
+  priority       String    @default("NORMAL") // LOW, NORMAL, HIGH, URGENT
+  targetAudience String    @default("ALL")    // ALL, STUDENTS, WARDENS, BLOCK
+  targetHostelId String?
+  targetBlockId  String?
+  publishedById  String
+  isPublished    Boolean   @default(true)
+  publishDate    DateTime  @default(now())
+  expiryDate     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([isPublished, publishDate])
+  @@index([priority])
+}
+
+// 18. Notification
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String
+  title     String
+  message   String
+  type      String    @default("INFO") // INFO, SUCCESS, WARNING, URGENT
+  linkUrl   String?
+  metadata  String?   // JSON string
+  isRead    Boolean   @default(false)
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+}
+
+// 19. Mess Menu
+model MessMenu {
+  id        String   @id @default(cuid())
+  dayOfWeek String   // MONDAY, TUESDAY, WEDNESDAY, THURSDAY, FRIDAY, SATURDAY, SUNDAY
+  mealType  String   // BREAKFAST, LUNCH, SNACKS, DINNER
+  items     String   // Comma-separated or JSON list of food items
+  timings   String   // e.g. 07:30 - 09:30 AM
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([dayOfWeek, mealType])
+}
+
+// 20. Student Feedback
+model Feedback {
+  id        String   @id @default(cuid())
+  studentId String
+  category  String   // MESS, HOSTEL_FACILITY, MAINTENANCE, GENERAL
+  title     String
+  rating    Int      @default(5) // 1-5
+  comments  String
+  status    String   @default("RECEIVED") // RECEIVED, REVIEWED, ACTIONED
+  createdAt DateTime @default(now())
+
+  student   Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@index([category])
+  @@index([studentId])
+}
+
+// 21. Audit Log
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String
+  actorRole  String   // STUDENT, WARDEN, ADMIN, SUPER_ADMIN, SYSTEM
+  actorName  String
+  action     String   // e.g. ROOM_ALLOCATED, LEAVE_APPROVED, COMPLAINT_ASSIGNED
+  targetType String   // RoomAllocation, LeaveRequest, Complaint, User
+  targetId   String
+  details    String?  // JSON string of before/after or payload
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  @@index([actorId])
+  @@index([targetType, targetId])
+  @@index([createdAt])
+}
+
+// 22. System Configuration & Rules
+model SystemSetting {
+  id          String   @id @default(cuid())
+  key         String   @unique // e.g. CURFEW_TIME, MAX_LEAVE_DAYS, AUTO_PASS_EXPIRY_HOURS
+  value       String   // e.g. 22:30
+  description String?
+  category    String   @default("GENERAL") // GENERAL, CURFEW, NOTICES, SECURITY
+  updatedAt   DateTime @updatedAt
+}
