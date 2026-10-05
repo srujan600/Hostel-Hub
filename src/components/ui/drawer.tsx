@@ -57,12 +57,12 @@ export function Drawer({
       />
 
       {/* Drawer Canvas */}
-      <div className="fixed inset-y-0 right-0 flex pl-10 max-w-full">
+      <div className="fixed inset-y-0 right-0 flex pl-0 sm:pl-10 max-w-full">
         <div
           className={`w-screen ${widthClasses} bg-white border-l border-slate-200 shadow-2xl flex flex-col justify-between animate-in slide-in-from-right duration-200`}
         >
           {/* Header */}
-          <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/60">
+          <div className="px-4 sm:px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/60">
             <div>
               <h3 className="font-heading font-semibold text-slate-900 text-base">
                 {title}
@@ -80,7 +80,7 @@ export function Drawer({
           </div>
 
           {/* Content Body */}
-          <div className="flex-1 overflow-y-auto p-6 custom-scrollbar">
+          <div className="flex-1 overflow-y-auto p-4 sm:p-6 custom-scrollbar">
             {children}
           </div>
 

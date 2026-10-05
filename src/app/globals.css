@@ -76,6 +76,45 @@
   box-shadow: none;
 }
 
+.tactile-btn-danger {
+  box-shadow: 0 2px 0 #9f1239, inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  transition: all 0.12s ease;
+}
+
+.tactile-btn-danger:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 3px 0 #9f1239, inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+
+.tactile-btn-danger:active {
+  transform: translateY(2px);
+  box-shadow: 0 0 0 transparent;
+}
+
+/* Glassmorphism & Elevated Card Utilities */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(226, 232, 240, 0.8);
+}
+
+.card-tactile-hover {
+  transition: transform 0.18s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.18s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.18s ease;
+}
+
+.card-tactile-hover:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 20px -4px rgba(0, 35, 111, 0.08), 0 4px 6px -2px rgba(0, 35, 111, 0.04);
+  border-color: #cbd5e1;
+}
+
+/* Keyboard Focus Ring */
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 2px solid #00236f;
+  outline-offset: 2px;
+}
+
 /* Custom Scrollbars */
 .custom-scrollbar::-webkit-scrollbar {
   width: 5px;
@@ -100,3 +139,4 @@
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum" 1;
 }
+

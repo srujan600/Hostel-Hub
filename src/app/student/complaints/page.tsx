@@ -20,9 +20,11 @@ import { Drawer } from "@/components/ui/drawer";
 import { Modal } from "@/components/ui/modal";
 import { EmptyState } from "@/components/ui/empty-state";
 import { TableSkeleton } from "@/components/ui/skeleton";
+import { useToast } from "@/components/ui/toast";
 import { api } from "@/services/api-client";
 
 export default function StudentComplaintsPage() {
+  const toast = useToast();
   const [complaints, setComplaints] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState("ALL");
@@ -82,15 +84,20 @@ export default function StudentComplaintsPage() {
       });
 
       if (res.success) {
+        toast.success("Complaint ticket filed successfully! Maintenance team notified.", "Ticket Created");
         setIsDrawerOpen(false);
         setFormTitle("");
         setFormDescription("");
         fetchComplaints();
       } else {
-        setFormError(res.error?.message || "Failed to submit ticket.");
+        const msg = res.error?.message || "Failed to submit ticket.";
+        setFormError(msg);
+        toast.error(msg, "Submission Failed");
       }
     } catch (err: any) {
-      setFormError(err.message || "Failed to submit complaint ticket.");
+      const msg = err.message || "Failed to submit complaint ticket.";
+      setFormError(msg);
+      toast.error(msg, "Submission Error");
     } finally {
       setSubmitting(false);
     }
@@ -106,15 +113,18 @@ export default function StudentComplaintsPage() {
         comment: commentText.trim(),
       });
       if (res.success && res.data) {
+        toast.success("Comment posted to ticket thread.", "Comment Added");
         setSelectedComplaint({
           ...selectedComplaint,
           comments: [...(selectedComplaint.comments || []), res.data],
         });
         setCommentText("");
         fetchComplaints();
+      } else {
+        toast.error(res.error?.message || "Failed to add comment.", "Comment Error");
       }
     } catch (err: any) {
-      alert(err.message || "Failed to add comment.");
+      toast.error(err.message || "Failed to add comment.", "Comment Error");
     } finally {
       setSubmittingComment(false);
     }

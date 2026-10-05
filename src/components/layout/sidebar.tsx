@@ -89,14 +89,14 @@ export function Sidebar({ role = "STUDENT", isOpen = false, onClose }: SidebarPr
       {/* Mobile Backdrop */}
       {isOpen && (
         <div
-          className="fixed inset-0 bg-slate-900/50 z-40 lg:hidden"
+          className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs z-40 lg:hidden transition-opacity animate-in fade-in"
           onClick={onClose}
         />
       )}
 
       {/* Sidebar Container */}
       <aside
-        className={`fixed left-0 top-16 h-[calc(100vh-4rem)] w-64 bg-slate-50 border-r border-slate-200/90 flex flex-col justify-between z-40 transition-transform duration-200 ease-in-out custom-scrollbar overflow-y-auto ${
+        className={`fixed left-0 top-16 h-[calc(100vh-4rem)] w-64 bg-slate-50 border-r border-slate-200/90 flex flex-col justify-between z-40 transition-transform duration-200 ease-in-out custom-scrollbar overflow-y-auto shadow-xl lg:shadow-none ${
           isOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
         }`}
       >

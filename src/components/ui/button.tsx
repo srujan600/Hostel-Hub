@@ -39,7 +39,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
       outline:
         "bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 tactile-btn-subtle active:translate-y-[1px]",
       destructive:
-        "bg-error hover:bg-rose-700 text-white shadow-sm active:translate-y-[1px] border border-rose-800/40",
+        "bg-rose-700 hover:bg-rose-800 text-white tactile-btn-danger border border-rose-900/30",
       subtle:
         "bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-200/80 active:translate-y-[1px]",
       ghost:

@@ -22,9 +22,11 @@ import { Drawer } from "@/components/ui/drawer";
 import { Modal } from "@/components/ui/modal";
 import { EmptyState } from "@/components/ui/empty-state";
 import { TableSkeleton } from "@/components/ui/skeleton";
+import { useToast } from "@/components/ui/toast";
 import { api } from "@/services/api-client";
 
 export default function StudentLeavePage() {
+  const toast = useToast();
   const [requests, setRequests] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState("ALL");
@@ -92,15 +94,20 @@ export default function StudentLeavePage() {
       });
 
       if (res.success) {
+        toast.success("Leave request submitted successfully! Pending warden review.", "Request Submitted");
         setIsDrawerOpen(false);
         setReason("");
         setDestination("");
         fetchLeaveRequests();
       } else {
-        setFormError(res.error?.message || "Failed to submit request.");
+        const msg = res.error?.message || "Failed to submit request.";
+        setFormError(msg);
+        toast.error(msg, "Submission Failed");
       }
     } catch (err: any) {
-      setFormError(err.message || "Failed to submit leave request.");
+      const msg = err.message || "Failed to submit leave request.";
+      setFormError(msg);
+      toast.error(msg, "Submission Error");
     } finally {
       setSubmitting(false);
     }

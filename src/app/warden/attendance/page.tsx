@@ -22,9 +22,11 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { TableSkeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/ui/empty-state";
+import { useToast } from "@/components/ui/toast";
 import { api } from "@/services/api-client";
 
 export default function WardenAttendancePage() {
+  const toast = useToast();
   const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split("T")[0]);
   const [roster, setRoster] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -67,9 +69,12 @@ export default function WardenAttendancePage() {
             item.studentId === studentId ? { ...item, status, remarks: remarks || item.remarks } : item
           )
         );
+        toast.success(`Resident status updated to ${status}`, "Attendance Marked");
+      } else {
+        toast.error(res.error?.message || "Failed to update attendance.", "Update Failed");
       }
     } catch (err: any) {
-      alert(err.message || "Failed to update attendance.");
+      toast.error(err.message || "Failed to update attendance.", "Error");
     } finally {
       setUpdatingId(null);
     }
@@ -86,10 +91,13 @@ export default function WardenAttendancePage() {
       });
 
       if (res.success) {
+        toast.success(`All residents marked PRESENT for ${selectedDate}.`, "Roll Call Complete");
         fetchAttendance();
+      } else {
+        toast.error(res.error?.message || "Failed to mark all present.", "Batch Update Failed");
       }
     } catch (err: any) {
-      alert(err.message || "Failed to mark all present.");
+      toast.error(err.message || "Failed to mark all present.", "Batch Update Error");
     } finally {
       setBatchLoading(false);
     }
