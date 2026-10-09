@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { connectToDatabase } from "@/lib/mongodb";
+import { Student, User, RoomAllocation, Bed, Room, Floor, Block, Hostel, Complaint, LeaveRequest } from "@/models";
 import { requireAuth } from "@/lib/auth";
 import { successResponse, errorResponse } from "@/lib/api-response";
 import { ForbiddenError, NotFoundError } from "@/lib/errors";
@@ -16,41 +17,83 @@ export async function GET(
     }
 
     const { id } = await params;
-    const student = await prisma.student.findUnique({
-      where: { id },
-      include: {
-        user: { select: { username: true, status: true } },
-        allocations: {
-          include: {
-            bed: {
-              include: {
-                room: {
-                  include: {
-                    floor: {
-                      include: {
-                        block: {
-                          include: {
-                            hostel: true,
-                          },
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-        complaints: true,
-        leaveRequests: true,
-      },
-    });
+    await connectToDatabase();
 
+    const student = await Student.findById(id).lean();
     if (!student) {
       throw new NotFoundError("Student not found");
     }
 
-    return successResponse(student);
+    const [user, allocations, complaints, leaveRequests] = await Promise.all([
+      User.findById(student.userId, { username: 1, status: 1 }).lean(),
+      RoomAllocation.find({ studentId: student._id }).lean(),
+      Complaint.find({ studentId: student._id }).sort({ createdAt: -1 }).lean(),
+      LeaveRequest.find({ studentId: student._id }).sort({ createdAt: -1 }).lean(),
+    ]);
+
+    const bedIds = allocations.map((a) => a.bedId);
+    const beds = await Bed.find({ _id: { $in: bedIds } }).lean();
+    const roomIds = beds.map((b) => b.roomId);
+    const rooms = await Room.find({ _id: { $in: roomIds } }).lean();
+    const floorIds = rooms.map((r) => r.floorId);
+    const floors = await Floor.find({ _id: { $in: floorIds } }).lean();
+    const blockIds = floors.map((f) => f.blockId);
+    const blocks = await Block.find({ _id: { $in: blockIds } }).lean();
+    const hostelIds = blocks.map((b) => b.hostelId);
+    const hostels = await Hostel.find({ _id: { $in: hostelIds } }).lean();
+
+    const bedMap = new Map(beds.map((b) => [b._id, b]));
+    const roomMap = new Map(rooms.map((r) => [r._id, r]));
+    const floorMap = new Map(floors.map((f) => [f._id, f]));
+    const blockMap = new Map(blocks.map((b) => [b._id, b]));
+    const hostelMap = new Map(hostels.map((h) => [h._id, h]));
+
+    const enrichedAllocations = allocations.map((a) => {
+      const bed = bedMap.get(a.bedId);
+      const room = bed ? roomMap.get(bed.roomId) : null;
+      const floor = room ? floorMap.get(room.floorId) : null;
+      const block = floor ? blockMap.get(floor.blockId) : null;
+      const hostel = block ? hostelMap.get(block.hostelId) : null;
+
+      return {
+        ...a,
+        id: a._id,
+        bed: bed
+          ? {
+              ...bed,
+              id: bed._id,
+              room: room
+                ? {
+                    ...room,
+                    id: room._id,
+                    floor: floor
+                      ? {
+                          ...floor,
+                          id: floor._id,
+                          block: block
+                            ? {
+                                ...block,
+                                id: block._id,
+                                hostel: hostel ? { ...hostel, id: hostel._id } : null,
+                              }
+                            : null,
+                        }
+                      : null,
+                  }
+                : null,
+            }
+          : null,
+      };
+    });
+
+    return successResponse({
+      ...student,
+      id: student._id,
+      user: user ? { username: user.username, status: user.status } : null,
+      allocations: enrichedAllocations,
+      complaints: complaints.map((c) => ({ ...c, id: c._id })),
+      leaveRequests: leaveRequests.map((l) => ({ ...l, id: l._id })),
+    });
   } catch (error) {
     return errorResponse(error);
   }
@@ -70,45 +113,30 @@ export async function PATCH(
     const body = await req.json();
     const { name, phone, course, department, yearOfStudy, status, emergencyContactName, emergencyContactPhone, address } = body;
 
-    const student = await prisma.student.findUnique({
-      where: { id },
-      include: { user: true },
-    });
+    await connectToDatabase();
+
+    const student = await Student.findById(id);
     if (!student) {
       throw new NotFoundError("Student not found");
     }
 
-    const updated = await prisma.$transaction(async (tx) => {
-      const st = await tx.student.update({
-        where: { id },
-        data: {
-          name: name ? name.trim() : undefined,
-          phone: phone ? phone.trim() : undefined,
-          course: course ? course.trim() : undefined,
-          department: department ? department.trim() : undefined,
-          yearOfStudy: yearOfStudy !== undefined ? Number(yearOfStudy) : undefined,
-          status: status || undefined,
-          emergencyContactName: emergencyContactName ? emergencyContactName.trim() : undefined,
-          emergencyContactPhone: emergencyContactPhone ? emergencyContactPhone.trim() : undefined,
-          address: address !== undefined ? address : undefined,
-        },
-      });
+    if (name) student.name = name.trim();
+    if (phone) student.phone = phone.trim();
+    if (course) student.course = course.trim();
+    if (department) student.department = department.trim();
+    if (yearOfStudy !== undefined) student.yearOfStudy = Number(yearOfStudy);
+    if (status) student.status = status;
+    if (emergencyContactName) student.emergencyContactName = emergencyContactName.trim();
+    if (emergencyContactPhone) student.emergencyContactPhone = emergencyContactPhone.trim();
+    if (address !== undefined) student.address = address;
 
-      // Synchronize User status if student status is suspended
-      if (status && (status === "SUSPENDED" || status === "INACTIVE")) {
-        await tx.user.update({
-          where: { id: student.userId },
-          data: { status: "SUSPENDED" },
-        });
-      } else if (status === "ACTIVE") {
-        await tx.user.update({
-          where: { id: student.userId },
-          data: { status: "ACTIVE" },
-        });
-      }
+    await student.save();
 
-      return st;
-    });
+    if (status && (status === "SUSPENDED" || status === "INACTIVE")) {
+      await User.updateOne({ _id: student.userId }, { $set: { status: "SUSPENDED" } });
+    } else if (status && status === "ACTIVE") {
+      await User.updateOne({ _id: student.userId }, { $set: { status: "ACTIVE" } });
+    }
 
     await AuditService.record({
       actorId: session.id,
@@ -121,7 +149,7 @@ export async function PATCH(
       ipAddress: req.headers.get("x-forwarded-for") || undefined,
     });
 
-    return successResponse(updated);
+    return successResponse(student.toJSON());
   } catch (error) {
     return errorResponse(error);
   }

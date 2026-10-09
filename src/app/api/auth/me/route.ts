@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { connectToDatabase } from "@/lib/mongodb";
+import { User, Student, Staff, RoomAllocation, Bed, Room, Floor, Block, Hostel } from "@/models";
 import { requireAuth } from "@/lib/auth";
 import { successResponse, errorResponse } from "@/lib/api-response";
 import { NotFoundError, UnauthorizedError } from "@/lib/errors";
@@ -8,43 +9,10 @@ export async function GET(req: NextRequest) {
   try {
     const session = await requireAuth(req);
 
+    await connectToDatabase();
+
     // Refresh from database to ensure up-to-date role and status
-    const user = await prisma.user.findUnique({
-      where: { id: session.id },
-      include: {
-        student: {
-          include: {
-            allocations: {
-              where: { status: "ACTIVE" },
-              include: {
-                bed: {
-                  include: {
-                    room: {
-                      include: {
-                        floor: {
-                          include: {
-                            block: {
-                              include: {
-                                hostel: true,
-                              },
-                            },
-                          },
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-        staff: {
-          include: {
-            assignedHostel: true,
-          },
-        },
-      },
-    });
+    const user = await User.findById(session.id);
 
     if (!user) {
       throw new NotFoundError("User account not found");
@@ -54,56 +22,92 @@ export async function GET(req: NextRequest) {
       throw new UnauthorizedError(`Account status is '${user.status}'. Session terminated.`);
     }
 
+    let studentProfileData: any = null;
+    let staffProfileData: any = null;
     let activeAllocation: any = null;
-    if (user.role === "STUDENT" && user.student?.allocations?.[0]) {
-      const alloc = user.student.allocations[0];
-      activeAllocation = {
-        allocationId: alloc.id,
-        academicYear: alloc.academicYear,
-        hostel: alloc.bed.room.floor.block.hostel.name,
-        hostelCode: alloc.bed.room.floor.block.hostel.code,
-        block: alloc.bed.room.floor.block.name,
-        blockCode: alloc.bed.room.floor.block.code,
-        floor: alloc.bed.room.floor.name,
-        roomNumber: alloc.bed.room.roomNumber,
-        bedNumber: alloc.bed.bedNumber,
-        roomType: alloc.bed.room.roomType,
-      };
+
+    if (user.role === "STUDENT") {
+      const student = await Student.findOne({ userId: user._id });
+      if (student) {
+        const alloc = await RoomAllocation.findOne({
+          studentId: student._id,
+          status: "ACTIVE",
+        });
+
+        if (alloc) {
+          const bed = await Bed.findById(alloc.bedId);
+          if (bed) {
+            const room = await Room.findById(bed.roomId);
+            if (room) {
+              const floor = await Floor.findById(room.floorId);
+              if (floor) {
+                const block = await Block.findById(floor.blockId);
+                if (block) {
+                  const hostel = await Hostel.findById(block.hostelId);
+                  activeAllocation = {
+                    allocationId: alloc._id,
+                    academicYear: alloc.academicYear,
+                    hostel: hostel ? hostel.name : "N/A",
+                    hostelCode: hostel ? hostel.code : "N/A",
+                    block: block.name,
+                    blockCode: block.code,
+                    floor: floor.name,
+                    roomNumber: room.roomNumber,
+                    bedNumber: bed.bedNumber,
+                    roomType: room.roomType,
+                  };
+                }
+              }
+            }
+          }
+        }
+
+        studentProfileData = {
+          studentId: student.studentId,
+          course: student.course,
+          department: student.department,
+          yearOfStudy: student.yearOfStudy,
+          phone: student.phone,
+          emergencyContactName: student.emergencyContactName,
+          emergencyContactPhone: student.emergencyContactPhone,
+          activeAllocation,
+        };
+      }
+    } else {
+      const staff = await Staff.findOne({ userId: user._id });
+      if (staff) {
+        let assignedHostelData: any = null;
+        if (staff.assignedHostelId) {
+          const hostel = await Hostel.findById(staff.assignedHostelId);
+          if (hostel) {
+            assignedHostelData = {
+              id: hostel._id,
+              name: hostel.name,
+              code: hostel.code,
+            };
+          }
+        }
+
+        staffProfileData = {
+          employeeId: staff.employeeId,
+          designation: staff.designation,
+          phone: staff.phone,
+          assignedHostel: assignedHostelData,
+        };
+      }
     }
 
     return successResponse({
-      id: user.id,
+      id: user._id,
       username: user.username,
       email: user.email,
       role: user.role,
       status: user.status,
-      name: user.student?.name || user.staff?.name || user.username,
-      studentProfile: user.student
-        ? {
-            studentId: user.student.studentId,
-            course: user.student.course,
-            department: user.student.department,
-            yearOfStudy: user.student.yearOfStudy,
-            phone: user.student.phone,
-            emergencyContactName: user.student.emergencyContactName,
-            emergencyContactPhone: user.student.emergencyContactPhone,
-            activeAllocation,
-          }
-        : null,
-      staffProfile: user.staff
-        ? {
-            employeeId: user.staff.employeeId,
-            designation: user.staff.designation,
-            phone: user.staff.phone,
-            assignedHostel: user.staff.assignedHostel
-              ? {
-                  id: user.staff.assignedHostel.id,
-                  name: user.staff.assignedHostel.name,
-                  code: user.staff.assignedHostel.code,
-                }
-              : null,
-          }
-        : null,
+      name:
+        (user.role === "STUDENT" ? studentProfileData?.name : staffProfileData?.name) ||
+        user.username,
+      studentProfile: studentProfileData,
+      staffProfile: staffProfileData,
     });
   } catch (error) {
     return errorResponse(error);

@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { connectToDatabase } from "@/lib/mongodb";
+import { LeaveRequest, Student } from "@/models";
 import { requireAuth } from "@/lib/auth";
 import { adjudicateLeaveSchema } from "@/lib/validations/leave";
 import { successResponse, errorResponse } from "@/lib/api-response";
@@ -15,36 +16,34 @@ export async function GET(
     const session = await requireAuth(req);
     const { id } = await params;
 
-    const leave = await prisma.leaveRequest.findUnique({
-      where: { id },
-      include: {
-        student: {
-          select: {
-            id: true,
-            name: true,
-            studentId: true,
-            course: true,
-            phone: true,
-            userId: true,
-          },
-        },
-      },
-    });
+    await connectToDatabase();
 
+    const leave = await LeaveRequest.findById(id).lean();
     if (!leave) {
       throw new NotFoundError("Leave request not found");
     }
 
     if (session.role === "STUDENT") {
-      const student = await prisma.student.findUnique({
-        where: { userId: session.id },
-      });
-      if (leave.studentId !== student?.id) {
+      const student = await Student.findOne({ userId: session.id }).lean();
+      if (leave.studentId !== student?._id) {
         throw new ForbiddenError("You cannot view another student's leave request");
       }
     }
 
-    return successResponse(leave);
+    const studentRecord = await Student.findById(leave.studentId, {
+      _id: 1,
+      name: 1,
+      studentId: 1,
+      course: 1,
+      phone: 1,
+      userId: 1,
+    }).lean();
+
+    return successResponse({
+      ...leave,
+      id: leave._id,
+      student: studentRecord ? { ...studentRecord, id: studentRecord._id } : null,
+    });
   } catch (error) {
     return errorResponse(error);
   }
@@ -58,7 +57,6 @@ export async function PATCH(
     const session = await requireAuth(req);
     const { id } = await params;
 
-    // Authorization: Only Wardens and Admins can adjudicate leave requests
     if (session.role !== "WARDEN" && session.role !== "ADMIN" && session.role !== "SUPER_ADMIN") {
       throw new ForbiddenError("Only Wardens and Administrators can adjudicate leave requests");
     }
@@ -71,65 +69,55 @@ export async function PATCH(
 
     const { status, reviewRemarks } = parseResult.data;
 
-    const leave = await prisma.leaveRequest.findUnique({
-      where: { id },
-      include: {
-        student: {
-          include: {
-            user: true,
-          },
-        },
-      },
-    });
+    await connectToDatabase();
 
+    const leave = await LeaveRequest.findById(id);
     if (!leave) {
       throw new NotFoundError("Leave request not found");
     }
 
-    // Critical Requirement: Idempotent Approval / Rejection
-    // If the request is already in the target state, return immediately without duplicate side-effects
-    if (leave.status === status) {
-      return successResponse(leave);
+    const student = await Student.findById(leave.studentId);
+    if (!student) {
+      throw new NotFoundError("Student record for leave not found");
     }
 
-    // Once a leave is completed or already departed, prevent status reversal without explicit admin override
+    if (leave.status === status) {
+      return successResponse({
+        ...leave.toJSON(),
+        student: student.toJSON(),
+      });
+    }
+
     if (leave.status === "COMPLETED") {
       throw new BadRequestError("Cannot adjudicate an already completed leave record");
     }
 
-    const updatedLeave = await prisma.leaveRequest.update({
-      where: { id: leave.id },
-      data: {
-        status,
-        reviewedById: session.id,
-        reviewedAt: new Date(),
-        reviewRemarks: reviewRemarks || leave.reviewRemarks,
-      },
-      include: {
-        student: true,
-      },
-    });
+    const previousStatus = leave.status;
+    leave.status = status;
+    leave.reviewedById = session.id;
+    leave.reviewedAt = new Date();
+    leave.reviewRemarks = reviewRemarks || leave.reviewRemarks;
 
-    // Audit Event
+    await leave.save();
+
     await AuditService.record({
       actorId: session.id,
       actorRole: session.role,
       actorName: session.name,
       action: `LEAVE_${status}`,
       targetType: "LeaveRequest",
-      targetId: leave.id,
+      targetId: leave._id,
       details: {
         requestCode: leave.requestCode,
-        previousStatus: leave.status,
+        previousStatus,
         newStatus: status,
         remarks: reviewRemarks,
       },
       ipAddress: req.headers.get("x-forwarded-for") || undefined,
     });
 
-    // Notify Student
     await NotificationService.send({
-      userId: leave.student.userId,
+      userId: student.userId,
       title: status === "APPROVED" ? "Leave Request Approved" : "Leave Request Declined",
       message:
         status === "APPROVED"
@@ -139,7 +127,10 @@ export async function PATCH(
       linkUrl: `/student/leave`,
     });
 
-    return successResponse(updatedLeave);
+    return successResponse({
+      ...leave.toJSON(),
+      student: student.toJSON(),
+    });
   } catch (error) {
     return errorResponse(error);
   }

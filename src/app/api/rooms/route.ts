@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { connectToDatabase } from "@/lib/mongodb";
+import { Room, Floor, Block, Hostel, Bed, RoomAllocation, Student } from "@/models";
 import { requireAuth } from "@/lib/auth";
 import { successResponse, errorResponse } from "@/lib/api-response";
 import { BadRequestError, ForbiddenError, NotFoundError } from "@/lib/errors";
@@ -8,6 +9,8 @@ import { AuditService } from "@/services/audit-service";
 export async function GET(req: NextRequest) {
   try {
     await requireAuth(req);
+    await connectToDatabase();
+
     const { searchParams } = new URL(req.url);
 
     const blockId = searchParams.get("blockId");
@@ -16,56 +19,76 @@ export async function GET(req: NextRequest) {
     const roomType = searchParams.get("roomType");
     const availableOnly = searchParams.get("availableOnly") === "true";
 
-    const whereClause: any = {};
-    if (floorId) whereClause.floorId = floorId;
-    if (blockId) whereClause.floor = { blockId };
-    if (status && status !== "ALL") whereClause.status = status;
-    if (roomType && roomType !== "ALL") whereClause.roomType = roomType;
-
-    const rooms = await prisma.room.findMany({
-      where: whereClause,
-      include: {
-        floor: {
-          include: {
-            block: {
-              include: {
-                hostel: true,
-              },
-            },
-          },
-        },
-        beds: {
-          include: {
-            allocations: {
-              where: { status: "ACTIVE" },
-              include: {
-                student: {
-                  select: {
-                    id: true,
-                    name: true,
-                    studentId: true,
-                    phone: true,
-                  },
-                },
-              },
-            },
-          },
-          orderBy: { bedNumber: "asc" },
-        },
-      },
-      orderBy: { roomNumber: "asc" },
-    });
-
-    // Optional filter: only rooms that have at least 1 available bed
-    let filteredRooms = rooms;
-    if (availableOnly) {
-      filteredRooms = rooms.filter((r) => r.beds.some((b) => b.status === "AVAILABLE"));
+    const query: any = {};
+    if (floorId) {
+      query.floorId = floorId;
+    } else if (blockId) {
+      const floorsInBlock = await Floor.find({ blockId }, { _id: 1 }).lean();
+      query.floorId = { $in: floorsInBlock.map((f) => f._id) };
     }
 
-    const formattedRooms = filteredRooms.map((r) => {
-      const availableBedsCount = r.beds.filter((b) => b.status === "AVAILABLE").length;
+    if (status && status !== "ALL") query.status = status;
+    if (roomType && roomType !== "ALL") query.roomType = roomType;
+
+    const rooms = await Room.find(query).sort({ roomNumber: 1 }).lean();
+    const roomIds = rooms.map((r) => r._id);
+    const floorIds = [...new Set(rooms.map((r) => r.floorId))];
+
+    const [floors, beds] = await Promise.all([
+      Floor.find({ _id: { $in: floorIds } }).lean(),
+      Bed.find({ roomId: { $in: roomIds } }).sort({ bedNumber: 1 }).lean(),
+    ]);
+
+    const blockIds = [...new Set(floors.map((f) => f.blockId))];
+    const blocks = await Block.find({ _id: { $in: blockIds } }).lean();
+
+    const hostelIds = [...new Set(blocks.map((b) => b.hostelId))];
+    const hostels = await Hostel.find({ _id: { $in: hostelIds } }).lean();
+
+    const bedIds = beds.map((b) => b._id);
+    const activeAllocations = await RoomAllocation.find({
+      bedId: { $in: bedIds },
+      status: "ACTIVE",
+    }).lean();
+
+    const studentIds = activeAllocations.map((a) => a.studentId);
+    const students = await Student.find(
+      { _id: { $in: studentIds } },
+      { _id: 1, name: 1, studentId: 1, phone: 1 }
+    ).lean();
+
+    const studentMap = new Map(
+      students.map((s) => [s._id, { id: s._id, name: s.name, studentId: s.studentId, phone: s.phone }])
+    );
+    const allocationMap = new Map(activeAllocations.map((a) => [a.bedId, a]));
+    const floorMap = new Map(floors.map((f) => [f._id, f]));
+    const blockMap = new Map(blocks.map((b) => [b._id, b]));
+    const hostelMap = new Map(hostels.map((h) => [h._id, h]));
+
+    const bedsByRoom = new Map<string, any[]>();
+    beds.forEach((b) => {
+      const alloc = allocationMap.get(b._id);
+      const student = alloc ? studentMap.get(alloc.studentId) || null : null;
+      const bList = bedsByRoom.get(b.roomId) || [];
+      bList.push({
+        id: b._id,
+        bedNumber: b.bedNumber,
+        status: b.status,
+        currentResident: student,
+        allocationId: alloc?._id || null,
+      });
+      bedsByRoom.set(b.roomId, bList);
+    });
+
+    let formattedRooms = rooms.map((r) => {
+      const roomBeds = bedsByRoom.get(r._id) || [];
+      const availableBedsCount = roomBeds.filter((b) => b.status === "AVAILABLE").length;
+      const floor = floorMap.get(r.floorId);
+      const block = floor ? blockMap.get(floor.blockId) : null;
+      const hostel = block ? hostelMap.get(block.hostelId) : null;
+
       return {
-        id: r.id,
+        id: r._id,
         roomNumber: r.roomNumber,
         roomType: r.roomType,
         capacity: r.capacity,
@@ -73,22 +96,20 @@ export async function GET(req: NextRequest) {
         availableBedsCount,
         status: r.status,
         floorId: r.floorId,
-        floorNumber: r.floor.floorNumber,
-        floorName: r.floor.name,
-        blockId: r.floor.block.id,
-        blockName: r.floor.block.name,
-        blockCode: r.floor.block.code,
-        hostelId: r.floor.block.hostel.id,
-        hostelName: r.floor.block.hostel.name,
-        beds: r.beds.map((b) => ({
-          id: b.id,
-          bedNumber: b.bedNumber,
-          status: b.status,
-          currentResident: b.allocations[0]?.student || null,
-          allocationId: b.allocations[0]?.id || null,
-        })),
+        floorNumber: floor?.floorNumber ?? 0,
+        floorName: floor?.name ?? "",
+        blockId: block?._id ?? "",
+        blockName: block?.name ?? "",
+        blockCode: block?.code ?? "",
+        hostelId: hostel?._id ?? "",
+        hostelName: hostel?.name ?? "",
+        beds: roomBeds,
       };
     });
+
+    if (availableOnly) {
+      formattedRooms = formattedRooms.filter((r) => r.availableBedsCount > 0);
+    }
 
     return successResponse(formattedRooms);
   } catch (error) {
@@ -110,21 +131,16 @@ export async function POST(req: NextRequest) {
       throw new BadRequestError("Floor ID and room number are required");
     }
 
-    const floor = await prisma.floor.findUnique({
-      where: { id: floorId },
-      include: { block: true },
-    });
+    await connectToDatabase();
+
+    const floor = await Floor.findById(floorId);
     if (!floor) {
       throw new NotFoundError("Floor not found");
     }
 
-    const existingRoom = await prisma.room.findUnique({
-      where: {
-        floorId_roomNumber: {
-          floorId,
-          roomNumber: String(roomNumber).trim(),
-        },
-      },
+    const existingRoom = await Room.findOne({
+      floorId,
+      roomNumber: String(roomNumber).trim(),
     });
 
     if (existingRoom) {
@@ -132,51 +148,31 @@ export async function POST(req: NextRequest) {
     }
 
     const parsedCapacity = Number(capacity) || (roomType === "SINGLE" ? 1 : roomType === "TRIPLE" ? 3 : 2);
+    const finalRoomType = roomType || (parsedCapacity === 1 ? "SINGLE" : parsedCapacity === 3 ? "TRIPLE" : "DOUBLE");
 
-    // Create room and generate beds within transaction
-    const newRoom = await prisma.$transaction(async (tx) => {
-      const room = await tx.room.create({
-        data: {
-          floorId,
-          roomNumber: String(roomNumber).trim(),
-          roomType: roomType || (parsedCapacity === 1 ? "SINGLE" : parsedCapacity === 3 ? "TRIPLE" : "DOUBLE"),
-          capacity: parsedCapacity,
-          occupiedBeds: 0,
-          status: "ACTIVE",
-        },
-      });
-
-      // Generate beds A, B, C, D...
-      const bedLetters = ["A", "B", "C", "D", "E", "F"];
-      for (let i = 0; i < parsedCapacity; i++) {
-        await tx.bed.create({
-          data: {
-            roomId: room.id,
-            bedNumber: bedLetters[i] || `B${i + 1}`,
-            status: "AVAILABLE",
-          },
-        });
-      }
-
-      // Increment floor totalRooms count
-      await tx.floor.update({
-        where: { id: floorId },
-        data: { totalRooms: { increment: 1 } },
-      });
-
-      // Increment block totalRooms count
-      await tx.block.update({
-        where: { id: floor.blockId },
-        data: { totalRooms: { increment: 1 } },
-      });
-
-      return room;
+    const newRoom = await Room.create({
+      floorId,
+      roomNumber: String(roomNumber).trim(),
+      roomType: finalRoomType,
+      capacity: parsedCapacity,
+      occupiedBeds: 0,
+      status: "ACTIVE",
     });
 
-    const fullRoom = await prisma.room.findUnique({
-      where: { id: newRoom.id },
-      include: { beds: true },
-    });
+    const bedLetters = ["A", "B", "C", "D", "E", "F"];
+    const bedsToCreate = [];
+    for (let i = 0; i < parsedCapacity; i++) {
+      bedsToCreate.push({
+        roomId: newRoom._id,
+        bedNumber: bedLetters[i] || `B${i + 1}`,
+        status: "AVAILABLE",
+      });
+    }
+
+    const createdBeds = await Bed.insertMany(bedsToCreate);
+
+    await Floor.updateOne({ _id: floorId }, { $inc: { totalRooms: 1 } });
+    await Block.updateOne({ _id: floor.blockId }, { $inc: { totalRooms: 1 } });
 
     await AuditService.record({
       actorId: session.id,
@@ -184,12 +180,15 @@ export async function POST(req: NextRequest) {
       actorName: session.name,
       action: "ROOM_CREATED",
       targetType: "Room",
-      targetId: newRoom.id,
+      targetId: newRoom._id,
       details: { roomNumber, roomType: newRoom.roomType, capacity: parsedCapacity },
       ipAddress: req.headers.get("x-forwarded-for") || undefined,
     });
 
-    return successResponse(fullRoom);
+    return successResponse({
+      ...newRoom.toJSON(),
+      beds: createdBeds.map((b) => b.toJSON()),
+    });
   } catch (error) {
     return errorResponse(error);
   }

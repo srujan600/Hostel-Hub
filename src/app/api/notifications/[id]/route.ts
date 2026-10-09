@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { connectToDatabase } from "@/lib/mongodb";
+import { Notification } from "@/models";
 import { requireAuth } from "@/lib/auth";
 import { successResponse, errorResponse } from "@/lib/api-response";
 import { NotFoundError, ForbiddenError } from "@/lib/errors";
@@ -12,10 +13,9 @@ export async function PATCH(
     const session = await requireAuth(req);
     const { id } = await params;
 
-    const notif = await prisma.notification.findUnique({
-      where: { id },
-    });
+    await connectToDatabase();
 
+    const notif = await Notification.findById(id);
     if (!notif) {
       throw new NotFoundError("Notification not found");
     }
@@ -24,15 +24,11 @@ export async function PATCH(
       throw new ForbiddenError("Cannot modify another user's notifications");
     }
 
-    const updated = await prisma.notification.update({
-      where: { id },
-      data: {
-        isRead: true,
-        readAt: new Date(),
-      },
-    });
+    notif.isRead = true;
+    notif.readAt = new Date();
+    await notif.save();
 
-    return successResponse(updated);
+    return successResponse(notif.toJSON());
   } catch (error) {
     return errorResponse(error);
   }
@@ -46,10 +42,9 @@ export async function DELETE(
     const session = await requireAuth(req);
     const { id } = await params;
 
-    const notif = await prisma.notification.findUnique({
-      where: { id },
-    });
+    await connectToDatabase();
 
+    const notif = await Notification.findById(id);
     if (!notif) {
       throw new NotFoundError("Notification not found");
     }
@@ -58,9 +53,7 @@ export async function DELETE(
       throw new ForbiddenError("Cannot delete another user's notifications");
     }
 
-    await prisma.notification.delete({
-      where: { id },
-    });
+    await Notification.deleteOne({ _id: id });
 
     return successResponse({ message: "Notification deleted" });
   } catch (error) {

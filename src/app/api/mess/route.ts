@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { connectToDatabase } from "@/lib/mongodb";
+import { MessMenu, Feedback, Student } from "@/models";
 import { requireAuth } from "@/lib/auth";
 import { successResponse, errorResponse } from "@/lib/api-response";
 import { BadRequestError, NotFoundError, ForbiddenError } from "@/lib/errors";
@@ -7,20 +8,20 @@ import { BadRequestError, NotFoundError, ForbiddenError } from "@/lib/errors";
 export async function GET(req: NextRequest) {
   try {
     await requireAuth(req);
+    await connectToDatabase();
 
-    const menus = await prisma.messMenu.findMany({
-      orderBy: [{ dayOfWeek: "asc" }, { mealType: "asc" }],
-    });
+    const menus = await MessMenu.find().sort({ dayOfWeek: 1, mealType: 1 }).lean();
 
     const days = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"];
     const todayName = days[new Date().getDay()];
 
-    const todayMeals = menus.filter((m) => m.dayOfWeek === todayName);
+    const formattedMenus = menus.map((m) => ({ ...m, id: m._id }));
+    const todayMeals = formattedMenus.filter((m) => m.dayOfWeek === todayName);
 
     return successResponse({
       todayDay: todayName,
       todayMeals,
-      allMenus: menus,
+      allMenus: formattedMenus,
     });
   } catch (error) {
     return errorResponse(error);
@@ -37,29 +38,27 @@ export async function POST(req: NextRequest) {
       throw new BadRequestError("Title and feedback comments are required");
     }
 
+    await connectToDatabase();
+
     let studentId = "";
     if (session.role === "STUDENT") {
-      const student = await prisma.student.findUnique({
-        where: { userId: session.id },
-      });
+      const student = await Student.findOne({ userId: session.id }).lean();
       if (!student) throw new NotFoundError("Student record not found");
-      studentId = student.id;
+      studentId = student._id;
     } else {
       throw new BadRequestError("Feedback can only be submitted by resident students");
     }
 
-    const feedback = await prisma.feedback.create({
-      data: {
-        studentId,
-        category: category || "MESS",
-        title,
-        comments,
-        rating: typeof rating === "number" ? Math.min(5, Math.max(1, rating)) : 5,
-        status: "RECEIVED",
-      },
+    const feedback = await Feedback.create({
+      studentId,
+      category: category || "MESS",
+      title,
+      comments,
+      rating: typeof rating === "number" ? Math.min(5, Math.max(1, rating)) : 5,
+      status: "RECEIVED",
     });
 
-    return successResponse(feedback, 201);
+    return successResponse(feedback.toJSON(), 201);
   } catch (error) {
     return errorResponse(error);
   }
@@ -79,28 +78,24 @@ export async function PUT(req: NextRequest) {
       throw new BadRequestError("Day of week, meal type, and items are required");
     }
 
-    const updated = await prisma.messMenu.upsert({
-      where: {
-        dayOfWeek_mealType: {
-          dayOfWeek,
-          mealType,
+    await connectToDatabase();
+
+    const updated = await MessMenu.findOneAndUpdate(
+      { dayOfWeek, mealType },
+      {
+        $set: {
+          items: items.trim(),
+          ...(timings ? { timings: timings.trim() } : {}),
+        },
+        $setOnInsert: {
+          timings: timings ? timings.trim() : "08:00 - 10:00 AM",
         },
       },
-      update: {
-        items: items.trim(),
-        timings: timings ? timings.trim() : undefined,
-      },
-      create: {
-        dayOfWeek,
-        mealType,
-        items: items.trim(),
-        timings: timings ? timings.trim() : "08:00 - 10:00 AM",
-      },
-    });
+      { upsert: true, returnDocument: "after" }
+    );
 
-    return successResponse(updated);
+    return successResponse(updated.toJSON());
   } catch (error) {
     return errorResponse(error);
   }
 }
-

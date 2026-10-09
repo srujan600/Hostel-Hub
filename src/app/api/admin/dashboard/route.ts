@@ -1,5 +1,20 @@
 import { NextRequest } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { connectToDatabase } from "@/lib/mongodb";
+import {
+  Bed,
+  Student,
+  RoomAllocation,
+  Staff,
+  Complaint,
+  LeaveRequest,
+  VisitorPass,
+  Hostel,
+  Block,
+  Floor,
+  Room,
+  AuditLog,
+} from "@/models";
+import { sanitizeDoc } from "@/models/_utils";
 import { requireAuth } from "@/lib/auth";
 import { successResponse, errorResponse } from "@/lib/api-response";
 import { ForbiddenError } from "@/lib/errors";
@@ -11,107 +26,92 @@ export async function GET(req: NextRequest) {
       throw new ForbiddenError("Forbidden: Administrator privileges required");
     }
 
+    await connectToDatabase();
+
     const now = new Date();
 
     // 1. Bed & Capacity Metrics
-    const totalBeds = await prisma.bed.count();
-    const occupiedBeds = await prisma.bed.count({ where: { status: "OCCUPIED" } });
-    const availableBeds = await prisma.bed.count({ where: { status: "AVAILABLE" } });
-    const maintenanceBeds = await prisma.bed.count({ where: { status: "MAINTENANCE" } });
+    const totalBeds = await Bed.countDocuments();
+    const occupiedBeds = await Bed.countDocuments({ status: "OCCUPIED" });
+    const availableBeds = await Bed.countDocuments({ status: "AVAILABLE" });
+    const maintenanceBeds = await Bed.countDocuments({ status: "MAINTENANCE" });
     const occupancyRate = totalBeds > 0 ? Math.round((occupiedBeds / totalBeds) * 100) : 0;
 
     // 2. Student Enrollment & Allocations
-    const totalStudents = await prisma.student.count();
-    const activeStudents = await prisma.student.count({ where: { status: "ACTIVE" } });
-    const allocatedStudents = await prisma.roomAllocation.count({ where: { status: "ACTIVE" } });
+    const totalStudents = await Student.countDocuments();
+    const activeStudents = await Student.countDocuments({ status: "ACTIVE" });
+    const allocatedStudents = await RoomAllocation.countDocuments({ status: "ACTIVE" });
     const unallocatedStudents = Math.max(0, activeStudents - allocatedStudents);
 
     // 3. Staff Breakdown
-    const totalStaff = await prisma.staff.count({ where: { status: "ACTIVE" } });
-    const wardensCount = await prisma.staff.count({ where: { role: "WARDEN", status: "ACTIVE" } });
-    const securityCount = await prisma.staff.count({ where: { role: "SECURITY", status: "ACTIVE" } });
-    const adminCount = await prisma.staff.count({ where: { role: "ADMIN", status: "ACTIVE" } });
+    const totalStaff = await Staff.countDocuments({ status: "ACTIVE" });
+    const wardensCount = await Staff.countDocuments({ role: "WARDEN", status: "ACTIVE" });
+    const securityCount = await Staff.countDocuments({ role: "SECURITY", status: "ACTIVE" });
+    const adminCount = await Staff.countDocuments({ role: "ADMIN", status: "ACTIVE" });
 
     // 4. Complaints & Grievance SLA
-    const totalComplaints = await prisma.complaint.count();
-    const openComplaints = await prisma.complaint.count({
-      where: { status: { in: ["SUBMITTED", "ASSIGNED", "IN_PROGRESS"] } },
+    const totalComplaints = await Complaint.countDocuments();
+    const openComplaints = await Complaint.countDocuments({
+      status: { $in: ["SUBMITTED", "ASSIGNED", "IN_PROGRESS"] },
     });
-    const urgentComplaints = await prisma.complaint.count({
-      where: {
-        priority: "URGENT",
-        status: { in: ["SUBMITTED", "ASSIGNED", "IN_PROGRESS"] },
-      },
+    const urgentComplaints = await Complaint.countDocuments({
+      priority: "URGENT",
+      status: { $in: ["SUBMITTED", "ASSIGNED", "IN_PROGRESS"] },
     });
 
     // 5. Leave & Gate Activity
-    const pendingLeaves = await prisma.leaveRequest.count({ where: { status: "SUBMITTED" } });
-    const activeOutingsNow = await prisma.leaveRequest.count({
-      where: {
-        status: "APPROVED",
-        startDate: { lte: now },
-        endDate: { gte: now },
-      },
+    const pendingLeaves = await LeaveRequest.countDocuments({ status: "SUBMITTED" });
+    const activeOutingsNow = await LeaveRequest.countDocuments({
+      status: "APPROVED",
+      startDate: { $lte: now },
+      endDate: { $gte: now },
     });
-    const activeVisitorsOnCampus = await prisma.visitorPass.count({
-      where: { status: "CHECKED_IN" },
+    const activeVisitorsOnCampus = await VisitorPass.countDocuments({
+      status: "CHECKED_IN",
     });
 
     // 6. Multi-Hostel Comparison
-    const hostels = await prisma.hostel.findMany({
-      include: {
-        blocks: {
-          include: {
-            floors: {
-              include: {
-                rooms: {
-                  include: {
-                    beds: true,
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-    });
+    const hostels = await Hostel.find().sort({ name: 1 }).lean();
 
-    const hostelComparison = hostels.map((h) => {
-      let hRooms = 0;
-      let hBeds = 0;
-      let hOccupied = 0;
+    const hostelComparison = await Promise.all(
+      hostels.map(async (h) => {
+        const blocks = await Block.find({ hostelId: h._id }).lean();
+        const blockIds = blocks.map((b) => b._id);
 
-      h.blocks.forEach((b) => {
-        b.floors.forEach((f) => {
-          hRooms += f.rooms.length;
-          f.rooms.forEach((r) => {
-            hBeds += r.beds.length;
-            r.beds.forEach((bed) => {
-              if (bed.status === "OCCUPIED") hOccupied++;
-            });
-          });
+        const floors = await Floor.find({ blockId: { $in: blockIds } }).lean();
+        const floorIds = floors.map((f) => f._id);
+
+        const rooms = await Room.find({ floorId: { $in: floorIds } }).lean();
+        const roomIds = rooms.map((r) => r._id);
+
+        const beds = await Bed.find({ roomId: { $in: roomIds } }).lean();
+
+        let hOccupied = 0;
+        beds.forEach((bed) => {
+          if (bed.status === "OCCUPIED") hOccupied++;
         });
-      });
 
-      return {
-        id: h.id,
-        code: h.code,
-        name: h.name,
-        genderType: h.genderType,
-        totalBlocks: h.blocks.length,
-        totalRooms: hRooms,
-        totalBeds: hBeds,
-        occupiedBeds: hOccupied,
-        availableBeds: Math.max(0, hBeds - hOccupied),
-        occupancyRate: hBeds > 0 ? Math.round((hOccupied / hBeds) * 100) : 0,
-      };
-    });
+        const hBeds = beds.length;
+        const hRooms = rooms.length;
+
+        return {
+          id: h._id,
+          code: h.code,
+          name: h.name,
+          genderType: h.genderType,
+          totalBlocks: blocks.length,
+          totalRooms: hRooms,
+          totalBeds: hBeds,
+          occupiedBeds: hOccupied,
+          availableBeds: Math.max(0, hBeds - hOccupied),
+          occupancyRate: hBeds > 0 ? Math.round((hOccupied / hBeds) * 100) : 0,
+        };
+      })
+    );
 
     // 7. Recent Audit Log Activity
-    const recentAuditLogs = await prisma.auditLog.findMany({
-      take: 6,
-      orderBy: { createdAt: "desc" },
-    });
+    const recentAuditLogsRaw = await AuditLog.find().sort({ createdAt: -1 }).limit(6).lean();
+    const recentAuditLogs = recentAuditLogsRaw.map(sanitizeDoc);
 
     return successResponse({
       overview: {

@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { connectToDatabase } from "@/lib/mongodb";
+import { RoomAllocation, Student, Bed, Room } from "@/models";
 import { requireAuth } from "@/lib/auth";
 import { successResponse, errorResponse } from "@/lib/api-response";
 import { BadRequestError, ForbiddenError, NotFoundError, ConflictError } from "@/lib/errors";
@@ -24,112 +25,84 @@ export async function POST(
       throw new BadRequestError("Target new bed ID is required");
     }
 
-    // 1. Transactional Transfer Execution
-    const transferResult = await prisma.$transaction(async (tx) => {
-      // Re-fetch current allocation
-      const currentAlloc = await tx.roomAllocation.findUnique({
-        where: { id },
-        include: {
-          student: true,
-          bed: {
-            include: {
-              room: true,
-            },
-          },
-        },
-      });
+    await connectToDatabase();
 
-      if (!currentAlloc) {
-        throw new NotFoundError("Current room allocation not found");
-      }
-      if (currentAlloc.status !== "ACTIVE") {
-        throw new ConflictError("Only ACTIVE room allocations can be transferred");
-      }
-      if (currentAlloc.bedId === newBedId) {
-        throw new BadRequestError("Target bed cannot be the same as current bed");
-      }
+    const currentAlloc = await RoomAllocation.findById(id);
+    if (!currentAlloc) {
+      throw new NotFoundError("Current room allocation not found");
+    }
+    if (currentAlloc.status !== "ACTIVE") {
+      throw new ConflictError("Only ACTIVE room allocations can be transferred");
+    }
+    if (currentAlloc.bedId === newBedId) {
+      throw new BadRequestError("Target bed cannot be the same as current bed");
+    }
 
-      // Re-fetch target bed
-      const targetBed = await tx.bed.findUnique({
-        where: { id: newBedId },
-        include: {
-          room: true,
-        },
-      });
+    const student = await Student.findById(currentAlloc.studentId);
+    if (!student) {
+      throw new NotFoundError("Student not found");
+    }
 
-      if (!targetBed) {
-        throw new NotFoundError("Target bed not found");
-      }
-      if (targetBed.status !== "AVAILABLE") {
-        throw new ConflictError(`Target bed ${targetBed.bedNumber} is ${targetBed.status} and cannot be transferred into.`);
-      }
-      if (targetBed.room.occupiedBeds >= targetBed.room.capacity) {
-        throw new ConflictError(`Target room ${targetBed.room.roomNumber} has reached full capacity.`);
-      }
+    const oldBed = await Bed.findById(currentAlloc.bedId);
+    const oldRoom = oldBed ? await Room.findById(oldBed.roomId) : null;
 
-      // Step A: Mark current allocation as TRANSFERRED
-      await tx.roomAllocation.update({
-        where: { id: currentAlloc.id },
-        data: {
-          status: "TRANSFERRED",
-          vacatedAt: new Date(),
-          remarks: reason ? `Transferred: ${reason}` : "Transferred to new room",
-        },
-      });
+    const targetBed = await Bed.findById(newBedId);
+    if (!targetBed) {
+      throw new NotFoundError("Target bed not found");
+    }
+    if (targetBed.status !== "AVAILABLE") {
+      throw new ConflictError(`Target bed ${targetBed.bedNumber} is ${targetBed.status} and cannot be transferred into.`);
+    }
 
-      // Step B: Free old bed and decrement old room occupiedBeds
-      await tx.bed.update({
-        where: { id: currentAlloc.bedId },
-        data: { status: "AVAILABLE" },
-      });
+    const targetRoom = await Room.findById(targetBed.roomId);
+    if (!targetRoom) {
+      throw new NotFoundError("Target room not found");
+    }
+    if (targetRoom.occupiedBeds >= targetRoom.capacity) {
+      throw new ConflictError(`Target room ${targetRoom.roomNumber} has reached full capacity.`);
+    }
 
-      await tx.room.update({
-        where: { id: currentAlloc.bed.roomId },
-        data: { occupiedBeds: { decrement: 1 } },
-      });
+    // Atomic claim of new bed
+    const claimedNewBed = await Bed.findOneAndUpdate(
+      { _id: newBedId, status: "AVAILABLE" },
+      { $set: { status: "OCCUPIED" } },
+      { returnDocument: "after" }
+    );
+    if (!claimedNewBed) {
+      throw new ConflictError(`Target bed ${targetBed.bedNumber} is no longer available.`);
+    }
 
-      // Step C: Create new allocation for student in target bed
-      const newAllocation = await tx.roomAllocation.create({
-        data: {
-          studentId: currentAlloc.studentId,
-          bedId: newBedId,
-          academicYear: currentAlloc.academicYear,
-          status: "ACTIVE",
-          allocatedAt: new Date(),
-          remarks: `Transferred from Room ${currentAlloc.bed.room.roomNumber}, Bed ${currentAlloc.bed.bedNumber}. Reason: ${reason || "Administrative Transfer"}`,
-        },
-        include: {
-          student: true,
-          bed: {
-            include: {
-              room: true,
-            },
-          },
-        },
-      });
+    // Step A: Mark current allocation as TRANSFERRED
+    currentAlloc.status = "TRANSFERRED";
+    currentAlloc.vacatedAt = new Date();
+    currentAlloc.remarks = reason ? `Transferred: ${reason}` : "Transferred to new room";
+    await currentAlloc.save();
 
-      // Step D: Mark target bed as OCCUPIED and increment target room occupiedBeds
-      await tx.bed.update({
-        where: { id: newBedId },
-        data: { status: "OCCUPIED" },
-      });
+    // Step B: Free old bed and decrement old room occupied beds
+    if (oldBed) {
+      await Bed.updateOne({ _id: oldBed._id }, { $set: { status: "AVAILABLE" } });
+    }
+    if (oldRoom) {
+      await Room.updateOne({ _id: oldRoom._id }, { $inc: { occupiedBeds: -1 } });
+    }
 
-      await tx.room.update({
-        where: { id: targetBed.roomId },
-        data: { occupiedBeds: { increment: 1 } },
-      });
+    // Step C: Increment target room occupied beds
+    await Room.updateOne({ _id: targetRoom._id }, { $inc: { occupiedBeds: 1 } });
 
-      return {
-        previousAllocation: currentAlloc,
-        newAllocation,
-      };
+    // Step D: Create new allocation
+    const newAllocation = await RoomAllocation.create({
+      studentId: currentAlloc.studentId,
+      bedId: newBedId,
+      academicYear: currentAlloc.academicYear,
+      status: "ACTIVE",
+      allocatedAt: new Date(),
+      remarks: `Transferred from Room ${oldRoom?.roomNumber || "N/A"}, Bed ${oldBed?.bedNumber || "N/A"}. Reason: ${reason || "Administrative Transfer"}`,
     });
 
-    // 2. Post-transaction notification and audit
     await NotificationService.send({
-      userId: transferResult.newAllocation.student.userId,
+      userId: student.userId,
       title: "Room Transfer Approved",
-      message: `Your room transfer has been processed. You have moved from Room ${transferResult.previousAllocation.bed.room.roomNumber} to Room ${transferResult.newAllocation.bed.room.roomNumber}, Bed ${transferResult.newAllocation.bed.bedNumber}.`,
+      message: `Your room transfer has been processed. You have moved from Room ${oldRoom?.roomNumber} to Room ${targetRoom.roomNumber}, Bed ${targetBed.bedNumber}.`,
       type: "INFO",
       linkUrl: "/student/room",
     });
@@ -140,20 +113,27 @@ export async function POST(
       actorName: session.name,
       action: "ROOM_TRANSFERRED",
       targetType: "RoomAllocation",
-      targetId: transferResult.newAllocation.id,
+      targetId: newAllocation._id,
       details: {
-        studentId: transferResult.newAllocation.studentId,
-        studentName: transferResult.newAllocation.student.name,
-        fromRoom: transferResult.previousAllocation.bed.room.roomNumber,
-        fromBed: transferResult.previousAllocation.bed.bedNumber,
-        toRoom: transferResult.newAllocation.bed.room.roomNumber,
-        toBed: transferResult.newAllocation.bed.bedNumber,
+        studentId: student._id,
+        studentName: student.name,
+        fromRoom: oldRoom?.roomNumber,
+        fromBed: oldBed?.bedNumber,
+        toRoom: targetRoom.roomNumber,
+        toBed: targetBed.bedNumber,
         reason,
       },
       ipAddress: req.headers.get("x-forwarded-for") || undefined,
     });
 
-    return successResponse(transferResult.newAllocation);
+    return successResponse({
+      ...newAllocation.toJSON(),
+      student: student.toJSON(),
+      bed: {
+        ...targetBed.toJSON(),
+        room: targetRoom.toJSON(),
+      },
+    });
   } catch (error) {
     return errorResponse(error);
   }

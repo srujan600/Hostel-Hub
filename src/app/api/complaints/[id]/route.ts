@@ -1,8 +1,9 @@
 import { NextRequest } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { connectToDatabase } from "@/lib/mongodb";
+import { Complaint, ComplaintComment, Student, Staff, User } from "@/models";
 import { requireAuth } from "@/lib/auth";
 import { successResponse, errorResponse } from "@/lib/api-response";
-import { BadRequestError, ForbiddenError, NotFoundError } from "@/lib/errors";
+import { ForbiddenError, NotFoundError } from "@/lib/errors";
 import { AuditService } from "@/services/audit-service";
 import { NotificationService } from "@/services/notification-service";
 
@@ -14,50 +15,40 @@ export async function GET(
     const session = await requireAuth(req);
     const { id } = await params;
 
-    const complaint = await prisma.complaint.findUnique({
-      where: { id },
-      include: {
-        student: {
-          select: {
-            id: true,
-            name: true,
-            studentId: true,
-            course: true,
-            phone: true,
-            userId: true,
-          },
-        },
-        assignedStaff: {
-          select: {
-            id: true,
-            name: true,
-            employeeId: true,
-            designation: true,
-          },
-        },
-        comments: {
-          orderBy: { createdAt: "asc" },
-        },
-      },
-    });
+    await connectToDatabase();
 
+    const complaint = await Complaint.findById(id).lean();
     if (!complaint) {
       throw new NotFoundError("Complaint ticket not found");
     }
 
-    // Role isolation check: student can only view their own ticket
     if (session.role === "STUDENT") {
-      const student = await prisma.student.findUnique({
-        where: { userId: session.id },
-      });
-      if (complaint.studentId !== student?.id) {
+      const student = await Student.findOne({ userId: session.id }).lean();
+      if (complaint.studentId !== student?._id) {
         throw new ForbiddenError("You do not have access to view this complaint");
       }
-      // Security hardening: filter out internal staff notes from student view
-      complaint.comments = complaint.comments.filter((c: any) => !c.isInternal);
     }
 
-    return successResponse(complaint);
+    const [student, staff, comments] = await Promise.all([
+      Student.findById(complaint.studentId, { _id: 1, name: 1, studentId: 1, course: 1, phone: 1, userId: 1 }).lean(),
+      complaint.assignedStaffId
+        ? Staff.findById(complaint.assignedStaffId, { _id: 1, name: 1, employeeId: 1, designation: 1 }).lean()
+        : null,
+      ComplaintComment.find({
+        complaintId: complaint._id,
+        ...(session.role === "STUDENT" ? { isInternal: false } : {}),
+      })
+        .sort({ createdAt: 1 })
+        .lean(),
+    ]);
+
+    return successResponse({
+      ...complaint,
+      id: complaint._id,
+      student: student ? { ...student, id: student._id } : null,
+      assignedStaff: staff ? { ...staff, id: staff._id } : null,
+      comments: comments.map((c) => ({ ...c, id: c._id })),
+    });
   } catch (error) {
     return errorResponse(error);
   }
@@ -72,108 +63,95 @@ export async function PATCH(
     const { id } = await params;
     const body = await req.json();
 
-    const complaint = await prisma.complaint.findUnique({
-      where: { id },
-      include: {
-        student: {
-          include: {
-            user: true,
-          },
-        },
-        assignedStaff: true,
-      },
-    });
+    await connectToDatabase();
 
+    const complaint = await Complaint.findById(id);
     if (!complaint) {
       throw new NotFoundError("Complaint ticket not found");
     }
 
-    const { status, assignedStaffId, priority, comment, isInternal } = body;
-    const updateData: any = {};
+    const student = await Student.findById(complaint.studentId);
+    if (!student) {
+      throw new NotFoundError("Student record for complaint not found");
+    }
 
-    // 1. Role-based privilege checks
+    const { status, assignedStaffId, priority, comment, isInternal } = body;
+    const previousStatus = complaint.status;
+
     if (session.role === "STUDENT") {
-      // Students can only close an already resolved ticket or reopen it
-      if (complaint.student.userId !== session.id) {
+      if (student.userId !== session.id) {
         throw new ForbiddenError("You cannot modify another student's complaint");
       }
       if (status && status !== "CLOSED" && status !== "IN_PROGRESS") {
         throw new ForbiddenError("Students can only mark resolved complaints as Closed or Reopen to In Progress");
       }
       if (status) {
-        updateData.status = status;
-        if (status === "CLOSED") updateData.closedAt = new Date();
+        complaint.status = status;
+        if (status === "CLOSED") complaint.closedAt = new Date();
       }
     } else {
-      // Warden / Administrator updates
       if (status) {
-        updateData.status = status;
-        if (status === "RESOLVED") updateData.resolvedAt = new Date();
-        if (status === "CLOSED") updateData.closedAt = new Date();
+        complaint.status = status;
+        if (status === "RESOLVED") complaint.resolvedAt = new Date();
+        if (status === "CLOSED") complaint.closedAt = new Date();
       }
       if (priority) {
-        updateData.priority = priority;
+        complaint.priority = priority;
       }
       if (assignedStaffId) {
-        updateData.assignedStaffId = assignedStaffId;
-        // Auto-advance SUBMITTED to ASSIGNED
+        complaint.assignedStaffId = assignedStaffId;
         if (complaint.status === "SUBMITTED" && !status) {
-          updateData.status = "ASSIGNED";
+          complaint.status = "ASSIGNED";
         }
       }
     }
 
-    // 2. Perform database update
-    const updatedComplaint = await prisma.complaint.update({
-      where: { id: complaint.id },
-      data: updateData,
-      include: {
-        assignedStaff: true,
-        student: true,
-      },
-    });
+    await complaint.save();
 
-    // 3. Optional comment logging
     if (comment && comment.trim()) {
-      await prisma.complaintComment.create({
-        data: {
-          complaintId: complaint.id,
-          authorId: session.id,
-          authorRole: session.role,
-          authorName: session.name,
-          comment: comment.trim(),
-          isInternal: session.role !== "STUDENT" && isInternal === true,
-        },
+      await ComplaintComment.create({
+        complaintId: complaint._id,
+        authorId: session.id,
+        authorRole: session.role,
+        authorName: session.name,
+        comment: comment.trim(),
+        isInternal: session.role !== "STUDENT" && isInternal === true,
       });
     }
 
-    // 4. Audit Log
     await AuditService.record({
       actorId: session.id,
       actorRole: session.role,
       actorName: session.name,
       action: status ? `COMPLAINT_STATUS_${status}` : "COMPLAINT_UPDATED",
       targetType: "Complaint",
-      targetId: complaint.id,
+      targetId: complaint._id,
       details: {
-        before: { status: complaint.status, priority: complaint.priority, staff: complaint.assignedStaffId },
-        after: { status: updatedComplaint.status, priority: updatedComplaint.priority, staff: updatedComplaint.assignedStaffId },
+        before: { status: previousStatus, priority: complaint.priority, staff: complaint.assignedStaffId },
+        after: { status: complaint.status, priority: complaint.priority, staff: complaint.assignedStaffId },
       },
       ipAddress: req.headers.get("x-forwarded-for") || undefined,
     });
 
-    // 5. Notify Student if status changed
-    if (status && status !== complaint.status) {
+    if (status && status !== previousStatus) {
       await NotificationService.send({
-        userId: complaint.student.userId,
+        userId: student.userId,
         title: `Ticket ${complaint.complaintCode} Updated`,
-        message: `Your maintenance ticket status changed from ${complaint.status} to ${status}.`,
+        message: `Your maintenance ticket status changed from ${previousStatus} to ${status}.`,
         type: status === "RESOLVED" ? "SUCCESS" : "INFO",
         linkUrl: `/student/complaints`,
       });
     }
 
-    return successResponse(updatedComplaint);
+    const staffRecord = complaint.assignedStaffId
+      ? await Staff.findById(complaint.assignedStaffId).lean()
+      : null;
+
+    return successResponse({
+      ...complaint.toJSON(),
+      student: student.toJSON(),
+      assignedStaff: staffRecord ? { ...staffRecord, id: staffRecord._id } : null,
+    });
   } catch (error) {
     return errorResponse(error);
   }

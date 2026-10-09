@@ -1,5 +1,14 @@
 import { NextRequest } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { connectToDatabase } from "@/lib/mongodb";
+import {
+  Bed,
+  Room,
+  Complaint,
+  Attendance,
+  Student,
+  VisitorPass,
+  LeaveRequest,
+} from "@/models";
 import { requireAuth } from "@/lib/auth";
 import { successResponse, errorResponse } from "@/lib/api-response";
 import { ForbiddenError } from "@/lib/errors";
@@ -11,63 +20,74 @@ export async function GET(req: NextRequest) {
       throw new ForbiddenError("Forbidden: Staff authorization required to access analytics");
     }
 
+    await connectToDatabase();
+
     const now = new Date();
     const fortyEightHoursAgo = new Date(Date.now() - 48 * 60 * 60 * 1000);
 
     // 1. Occupancy & Bed Distribution
-    const totalBeds = await prisma.bed.count();
-    const occupiedBeds = await prisma.bed.count({ where: { status: "OCCUPIED" } });
-    const availableBeds = await prisma.bed.count({ where: { status: "AVAILABLE" } });
-    const maintenanceBeds = await prisma.bed.count({ where: { status: "MAINTENANCE" } });
+    const totalBeds = await Bed.countDocuments();
+    const occupiedBeds = await Bed.countDocuments({ status: "OCCUPIED" });
+    const availableBeds = await Bed.countDocuments({ status: "AVAILABLE" });
+    const maintenanceBeds = await Bed.countDocuments({ status: "MAINTENANCE" });
     const occupancyRate = totalBeds > 0 ? Math.round((occupiedBeds / totalBeds) * 100) : 0;
 
-    const roomsByType = await prisma.room.groupBy({
-      by: ["roomType"],
-      _count: { id: true },
-      _sum: { capacity: true, occupiedBeds: true },
-    });
+    const roomsByType = await Room.aggregate([
+      {
+        $group: {
+          _id: "$roomType",
+          count: { $sum: 1 },
+          capacity: { $sum: "$capacity" },
+          occupiedBeds: { $sum: "$occupiedBeds" },
+        },
+      },
+    ]);
 
     // 2. Complaint & Maintenance SLA Analytics
-    const totalComplaints = await prisma.complaint.count();
-    const resolvedComplaints = await prisma.complaint.count({
-      where: { status: { in: ["RESOLVED", "CLOSED"] } },
+    const totalComplaints = await Complaint.countDocuments();
+    const resolvedComplaints = await Complaint.countDocuments({
+      status: { $in: ["RESOLVED", "CLOSED"] },
     });
-    const openComplaints = await prisma.complaint.count({
-      where: { status: { in: ["SUBMITTED", "ASSIGNED", "IN_PROGRESS"] } },
+    const openComplaints = await Complaint.countDocuments({
+      status: { $in: ["SUBMITTED", "ASSIGNED", "IN_PROGRESS"] },
     });
-    const agingComplaints = await prisma.complaint.count({
-      where: {
-        status: { in: ["SUBMITTED", "ASSIGNED", "IN_PROGRESS"] },
-        createdAt: { lte: fortyEightHoursAgo },
-      },
+    const agingComplaints = await Complaint.countDocuments({
+      status: { $in: ["SUBMITTED", "ASSIGNED", "IN_PROGRESS"] },
+      createdAt: { $lte: fortyEightHoursAgo },
     });
 
     const resolutionRate = totalComplaints > 0 ? Math.round((resolvedComplaints / totalComplaints) * 100) : 100;
 
-    const complaintsByCategory = await prisma.complaint.groupBy({
-      by: ["category"],
-      _count: { id: true },
-    });
+    const complaintsByCategory = await Complaint.aggregate([
+      {
+        $group: {
+          _id: "$category",
+          count: { $sum: 1 },
+        },
+      },
+    ]);
 
-    const complaintsByPriority = await prisma.complaint.groupBy({
-      by: ["priority"],
-      _count: { id: true },
-    });
+    const complaintsByPriority = await Complaint.aggregate([
+      {
+        $group: {
+          _id: "$priority",
+          count: { $sum: 1 },
+        },
+      },
+    ]);
 
     // 3. Attendance & Curfew Compliance (Last 30 Days)
     const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
-    const attendanceRecords = await prisma.attendance.findMany({
-      where: { date: { gte: thirtyDaysAgo } },
-      include: {
-        student: {
-          select: {
-            id: true,
-            name: true,
-            studentId: true,
-          },
-        },
-      },
-    });
+    const attendanceRecords = await Attendance.find({ date: { $gte: thirtyDaysAgo } }).lean();
+
+    const studentIds = Array.from(new Set(attendanceRecords.map((a) => a.studentId)));
+    const students = await Student.find({ _id: { $in: studentIds } })
+      .select("name studentId")
+      .lean();
+
+    const studentMap = new Map(
+      students.map((s) => [s._id, { id: s._id, name: s.name, studentId: s.studentId }])
+    );
 
     const totalAttendanceMarks = attendanceRecords.length;
     const presentMarks = attendanceRecords.filter((a) => a.status === "PRESENT").length;
@@ -85,7 +105,7 @@ export async function GET(req: NextRequest) {
     attendanceRecords.forEach((a) => {
       if (a.status === "ABSENT") {
         if (!absenceCounts[a.studentId]) {
-          absenceCounts[a.studentId] = { student: a.student, count: 0 };
+          absenceCounts[a.studentId] = { student: studentMap.get(a.studentId) || null, count: 0 };
         }
         absenceCounts[a.studentId].count++;
       }
@@ -96,24 +116,28 @@ export async function GET(req: NextRequest) {
       .sort((a, b) => b.count - a.count);
 
     // 4. Visitor Gate Analytics
-    const totalVisitorPasses = await prisma.visitorPass.count();
-    const activeVisitorsOnCampus = await prisma.visitorPass.count({
-      where: { status: "CHECKED_IN" },
+    const totalVisitorPasses = await VisitorPass.countDocuments();
+    const activeVisitorsOnCampus = await VisitorPass.countDocuments({
+      status: "CHECKED_IN",
     });
-    const completedVisitorVisits = await prisma.visitorPass.count({
-      where: { status: "CHECKED_OUT" },
+    const completedVisitorVisits = await VisitorPass.countDocuments({
+      status: "CHECKED_OUT",
     });
 
     // 5. Leave & Outings Analytics
-    const totalLeaves = await prisma.leaveRequest.count();
-    const approvedLeaves = await prisma.leaveRequest.count({ where: { status: "APPROVED" } });
-    const rejectedLeaves = await prisma.leaveRequest.count({ where: { status: "REJECTED" } });
+    const totalLeaves = await LeaveRequest.countDocuments();
+    const approvedLeaves = await LeaveRequest.countDocuments({ status: "APPROVED" });
+    const rejectedLeaves = await LeaveRequest.countDocuments({ status: "REJECTED" });
     const approvalRate = totalLeaves > 0 ? Math.round((approvedLeaves / totalLeaves) * 100) : 0;
 
-    const leavesByType = await prisma.leaveRequest.groupBy({
-      by: ["leaveType"],
-      _count: { id: true },
-    });
+    const leavesByType = await LeaveRequest.aggregate([
+      {
+        $group: {
+          _id: "$leaveType",
+          count: { $sum: 1 },
+        },
+      },
+    ]);
 
     return successResponse({
       occupancy: {
@@ -123,11 +147,11 @@ export async function GET(req: NextRequest) {
         maintenanceBeds,
         occupancyRate,
         byType: roomsByType.map((r) => ({
-          type: r.roomType,
-          roomCount: r._count.id,
-          capacity: r._sum.capacity || 0,
-          occupied: r._sum.occupiedBeds || 0,
-          pct: r._sum.capacity ? Math.round(((r._sum.occupiedBeds || 0) / r._sum.capacity) * 100) : 0,
+          type: r._id,
+          roomCount: r.count,
+          capacity: r.capacity || 0,
+          occupied: r.occupiedBeds || 0,
+          pct: r.capacity ? Math.round(((r.occupiedBeds || 0) / r.capacity) * 100) : 0,
         })),
       },
       complaints: {
@@ -136,8 +160,8 @@ export async function GET(req: NextRequest) {
         open: openComplaints,
         agingOver48h: agingComplaints,
         resolutionRate,
-        byCategory: complaintsByCategory.map((c) => ({ category: c.category, count: c._count.id })),
-        byPriority: complaintsByPriority.map((c) => ({ priority: c.priority, count: c._count.id })),
+        byCategory: complaintsByCategory.map((c) => ({ category: c._id, count: c.count })),
+        byPriority: complaintsByPriority.map((c) => ({ priority: c._id, count: c.count })),
       },
       attendance: {
         totalMarks: totalAttendanceMarks,
@@ -158,7 +182,7 @@ export async function GET(req: NextRequest) {
         approved: approvedLeaves,
         rejected: rejectedLeaves,
         approvalRate,
-        byType: leavesByType.map((l) => ({ type: l.leaveType, count: l._count.id })),
+        byType: leavesByType.map((l) => ({ type: l._id, count: l.count })),
       },
     });
   } catch (error) {

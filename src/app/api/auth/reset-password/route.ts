@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { jwtVerify } from "jose";
-import { prisma } from "@/lib/prisma";
+import { connectToDatabase } from "@/lib/mongodb";
+import { User } from "@/models";
 import { resetPasswordSchema } from "@/lib/validations/auth";
 import { hashPassword } from "@/lib/auth";
 import { successResponse, errorResponse } from "@/lib/api-response";
@@ -42,9 +43,9 @@ export async function POST(req: NextRequest) {
       throw new UnauthorizedError("Invalid token purpose");
     }
 
-    const user = await prisma.user.findUnique({
-      where: { id: payload.userId },
-    });
+    await connectToDatabase();
+
+    const user = await User.findById(payload.userId);
 
     if (!user) {
       throw new NotFoundError("User account not found");
@@ -52,18 +53,18 @@ export async function POST(req: NextRequest) {
 
     const newHashedPassword = await hashPassword(newPassword);
 
-    await prisma.user.update({
-      where: { id: user.id },
-      data: { passwordHash: newHashedPassword },
-    });
+    await User.updateOne(
+      { _id: user._id },
+      { $set: { passwordHash: newHashedPassword } }
+    );
 
     await AuditService.record({
-      actorId: user.id,
+      actorId: user._id,
       actorRole: user.role,
       actorName: user.username,
       action: "PASSWORD_RESET_COMPLETED",
       targetType: "User",
-      targetId: user.id,
+      targetId: user._id,
       ipAddress: req.headers.get("x-forwarded-for") || undefined,
     });
 

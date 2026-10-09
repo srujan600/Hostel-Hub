@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { connectToDatabase } from "@/lib/mongodb";
+import { RoomAllocation, Student, Bed, Room, Floor, Block, Hostel } from "@/models";
 import { requireAuth } from "@/lib/auth";
 import { successResponse, errorResponse } from "@/lib/api-response";
 import { BadRequestError, ForbiddenError, NotFoundError, ConflictError } from "@/lib/errors";
@@ -9,93 +10,106 @@ import { NotificationService } from "@/services/notification-service";
 export async function GET(req: NextRequest) {
   try {
     const session = await requireAuth(req);
-    const { searchParams } = new URL(req.url);
+    await connectToDatabase();
 
+    const { searchParams } = new URL(req.url);
     const status = searchParams.get("status");
     const studentId = searchParams.get("studentId");
     const search = searchParams.get("search");
 
-    const whereClause: any = {};
+    const query: any = {};
 
     if (session.role === "STUDENT") {
-      const student = await prisma.student.findUnique({
-        where: { userId: session.id },
-      });
+      const student = await Student.findOne({ userId: session.id }).lean();
       if (!student) throw new NotFoundError("Student record not found");
-      whereClause.studentId = student.id;
+      query.studentId = student._id;
     } else {
-      if (studentId) whereClause.studentId = studentId;
+      if (studentId) query.studentId = studentId;
     }
 
     if (status && status !== "ALL") {
-      whereClause.status = status;
+      query.status = status;
     }
 
-    const allocations = await prisma.roomAllocation.findMany({
-      where: whereClause,
-      include: {
-        student: {
-          select: {
-            id: true,
-            userId: true,
-            name: true,
-            studentId: true,
-            course: true,
-            phone: true,
-            emergencyContactPhone: true,
-          },
-        },
-        bed: {
-          include: {
-            room: {
-              include: {
-                floor: {
-                  include: {
-                    block: {
-                      include: {
-                        hostel: true,
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-      orderBy: { allocatedAt: "desc" },
+    const allocations = await RoomAllocation.find(query).sort({ allocatedAt: -1 }).lean();
+
+    const studentIds = [...new Set(allocations.map((a) => a.studentId))];
+    const bedIds = [...new Set(allocations.map((a) => a.bedId))];
+
+    const [students, beds] = await Promise.all([
+      Student.find({ _id: { $in: studentIds } }).lean(),
+      Bed.find({ _id: { $in: bedIds } }).lean(),
+    ]);
+
+    const roomIds = [...new Set(beds.map((b) => b.roomId))];
+    const rooms = await Room.find({ _id: { $in: roomIds } }).lean();
+
+    const floorIds = [...new Set(rooms.map((r) => r.floorId))];
+    const floors = await Floor.find({ _id: { $in: floorIds } }).lean();
+
+    const blockIds = [...new Set(floors.map((f) => f.blockId))];
+    const blocks = await Block.find({ _id: { $in: blockIds } }).lean();
+
+    const hostelIds = [...new Set(blocks.map((b) => b.hostelId))];
+    const hostels = await Hostel.find({ _id: { $in: hostelIds } }).lean();
+
+    const studentMap = new Map(students.map((s) => [s._id, s]));
+    const bedMap = new Map(beds.map((b) => [b._id, b]));
+    const roomMap = new Map(rooms.map((r) => [r._id, r]));
+    const floorMap = new Map(floors.map((f) => [f._id, f]));
+    const blockMap = new Map(blocks.map((b) => [b._id, b]));
+    const hostelMap = new Map(hostels.map((h) => [h._id, h]));
+
+    let formatted = allocations.map((a) => {
+      const student = studentMap.get(a.studentId);
+      const bed = bedMap.get(a.bedId);
+      const room = bed ? roomMap.get(bed.roomId) : null;
+      const floor = room ? floorMap.get(room.floorId) : null;
+      const block = floor ? blockMap.get(floor.blockId) : null;
+      const hostel = block ? hostelMap.get(block.hostelId) : null;
+
+      return {
+        id: a._id,
+        academicYear: a.academicYear,
+        allocatedAt: a.allocatedAt,
+        vacatedAt: a.vacatedAt,
+        status: a.status,
+        remarks: a.remarks,
+        student: student
+          ? {
+              id: student._id,
+              userId: student.userId,
+              name: student.name,
+              studentId: student.studentId,
+              course: student.course,
+              phone: student.phone,
+              emergencyContactPhone: student.emergencyContactPhone,
+            }
+          : null,
+        bed: bed
+          ? {
+              id: bed._id,
+              bedNumber: bed.bedNumber,
+              status: bed.status,
+              roomNumber: room?.roomNumber || "N/A",
+              roomType: room?.roomType || "N/A",
+              floorName: floor?.name || "N/A",
+              blockName: block?.name || "N/A",
+              hostelName: hostel?.name || "N/A",
+            }
+          : null,
+      };
     });
 
-    let filtered = allocations;
     if (search && search.trim()) {
       const q = search.toLowerCase();
-      filtered = allocations.filter((a) => {
-        const matchName = a.student.name.toLowerCase().includes(q);
-        const matchRoll = a.student.studentId.toLowerCase().includes(q);
-        const matchRoom = a.bed.room.roomNumber.toLowerCase().includes(q);
+      formatted = formatted.filter((a) => {
+        const matchName = a.student?.name.toLowerCase().includes(q);
+        const matchRoll = a.student?.studentId.toLowerCase().includes(q);
+        const matchRoom = a.bed?.roomNumber.toLowerCase().includes(q);
         return matchName || matchRoll || matchRoom;
       });
     }
-
-    const formatted = filtered.map((a) => ({
-      id: a.id,
-      academicYear: a.academicYear,
-      allocatedAt: a.allocatedAt,
-      vacatedAt: a.vacatedAt,
-      status: a.status,
-      remarks: a.remarks,
-      student: a.student,
-      bed: {
-        id: a.bed.id,
-        bedNumber: a.bed.bedNumber,
-        status: a.bed.status,
-        roomNumber: a.bed.room.roomNumber,
-        roomType: a.bed.room.roomType,
-        floorName: a.bed.room.floor.name,
-        blockName: a.bed.room.floor.block.name,
-        hostelName: a.bed.room.floor.block.hostel.name,
-      },
-    }));
 
     return successResponse(formatted);
   } catch (error) {
@@ -117,83 +131,62 @@ export async function POST(req: NextRequest) {
       throw new BadRequestError("Student ID and Bed ID are required");
     }
 
-    // 1. Pre-validation: Student check
-    const student = await prisma.student.findUnique({
-      where: { id: studentId },
-    });
+    await connectToDatabase();
+
+    const student = await Student.findById(studentId);
     if (!student) {
       throw new NotFoundError("Student not found");
     }
 
-    // 2. Transactional Concurrency-Safe Allocation
-    const result = await prisma.$transaction(async (tx) => {
-      // Re-check student does not already have an active allocation inside transaction
-      const existingAlloc = await tx.roomAllocation.findFirst({
-        where: {
-          studentId,
-          status: "ACTIVE",
-        },
-      });
-      if (existingAlloc) {
-        throw new ConflictError(`Student ${student.name} already has an active room allocation.`);
-      }
+    const existingAlloc = await RoomAllocation.findOne({
+      studentId,
+      status: "ACTIVE",
+    });
+    if (existingAlloc) {
+      throw new ConflictError(`Student ${student.name} already has an active room allocation.`);
+    }
 
-      // Re-fetch bed inside transaction
-      const bed = await tx.bed.findUnique({
-        where: { id: bedId },
-        include: { room: true },
-      });
-      if (!bed) {
-        throw new NotFoundError("Bed not found");
-      }
-      if (bed.status !== "AVAILABLE") {
-        throw new ConflictError(`Bed ${bed.bedNumber} is currently ${bed.status} and cannot be allocated.`);
-      }
+    const bed = await Bed.findById(bedId);
+    if (!bed) {
+      throw new NotFoundError("Bed not found");
+    }
+    if (bed.status !== "AVAILABLE") {
+      throw new ConflictError(`Bed ${bed.bedNumber} is currently ${bed.status} and cannot be allocated.`);
+    }
 
-      if (bed.room.occupiedBeds >= bed.room.capacity) {
-        throw new ConflictError(`Room ${bed.room.roomNumber} has reached its maximum capacity of ${bed.room.capacity} beds.`);
-      }
+    const room = await Room.findById(bed.roomId);
+    if (!room) {
+      throw new NotFoundError("Room not found");
+    }
+    if (room.occupiedBeds >= room.capacity) {
+      throw new ConflictError(`Room ${room.roomNumber} has reached its maximum capacity of ${room.capacity} beds.`);
+    }
 
-      // Create allocation
-      const allocation = await tx.roomAllocation.create({
-        data: {
-          studentId,
-          bedId,
-          academicYear: academicYear || "2026-2027",
-          status: "ACTIVE",
-          allocatedAt: new Date(),
-          remarks: remarks || "Standard Room Allocation",
-        },
-        include: {
-          student: true,
-          bed: {
-            include: {
-              room: true,
-            },
-          },
-        },
-      });
+    // Atomic claim of bed
+    const claimedBed = await Bed.findOneAndUpdate(
+      { _id: bedId, status: "AVAILABLE" },
+      { $set: { status: "OCCUPIED" } },
+      { returnDocument: "after" }
+    );
+    if (!claimedBed) {
+      throw new ConflictError(`Bed ${bed.bedNumber} was just allocated by another user.`);
+    }
 
-      // Update bed status to OCCUPIED
-      await tx.bed.update({
-        where: { id: bedId },
-        data: { status: "OCCUPIED" },
-      });
+    await Room.updateOne({ _id: room._id }, { $inc: { occupiedBeds: 1 } });
 
-      // Increment room occupied beds
-      await tx.room.update({
-        where: { id: bed.roomId },
-        data: { occupiedBeds: { increment: 1 } },
-      });
-
-      return allocation;
+    const allocation = await RoomAllocation.create({
+      studentId,
+      bedId,
+      academicYear: academicYear || "2026-2027",
+      status: "ACTIVE",
+      allocatedAt: new Date(),
+      remarks: remarks || "Standard Room Allocation",
     });
 
-    // 3. Post-transaction notification and audit
     await NotificationService.send({
       userId: student.userId,
       title: "Room Allocated",
-      message: `You have been allocated Room ${result.bed.room.roomNumber}, Bed ${result.bed.bedNumber}.`,
+      message: `You have been allocated Room ${room.roomNumber}, Bed ${bed.bedNumber}.`,
       type: "SUCCESS",
       linkUrl: "/student/room",
     });
@@ -204,17 +197,24 @@ export async function POST(req: NextRequest) {
       actorName: session.name,
       action: "ROOM_ALLOCATED",
       targetType: "RoomAllocation",
-      targetId: result.id,
+      targetId: allocation._id,
       details: {
         studentId,
         studentName: student.name,
-        roomNumber: result.bed.room.roomNumber,
-        bedNumber: result.bed.bedNumber,
+        roomNumber: room.roomNumber,
+        bedNumber: bed.bedNumber,
       },
       ipAddress: req.headers.get("x-forwarded-for") || undefined,
     });
 
-    return successResponse(result);
+    return successResponse({
+      ...allocation.toJSON(),
+      student: student.toJSON(),
+      bed: {
+        ...bed.toJSON(),
+        room: room.toJSON(),
+      },
+    });
   } catch (error) {
     return errorResponse(error);
   }

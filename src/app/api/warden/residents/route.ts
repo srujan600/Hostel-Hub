@@ -1,5 +1,7 @@
 import { NextRequest } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { connectToDatabase } from "@/lib/mongodb";
+import { Student, RoomAllocation, Bed, Room, Floor, Block, Hostel, Complaint, LeaveRequest } from "@/models";
+import { escapeRegex } from "@/models/_utils";
 import { requireAuth } from "@/lib/auth";
 import { successResponse, errorResponse } from "@/lib/api-response";
 import { ForbiddenError } from "@/lib/errors";
@@ -16,63 +18,75 @@ export async function GET(req: NextRequest) {
     const course = searchParams.get("course");
     const status = searchParams.get("status");
 
-    const whereClause: any = {};
+    await connectToDatabase();
+
+    const query: any = {};
     if (search) {
-      whereClause.OR = [
-        { name: { contains: search } },
-        { studentId: { contains: search } },
-        { email: { contains: search } },
-        { phone: { contains: search } },
+      const safeSearch = escapeRegex(search);
+      query.$or = [
+        { name: { $regex: safeSearch, $options: "i" } },
+        { studentId: { $regex: safeSearch, $options: "i" } },
+        { email: { $regex: safeSearch, $options: "i" } },
+        { phone: { $regex: safeSearch, $options: "i" } },
       ];
     }
     if (course && course !== "ALL") {
-      whereClause.course = { contains: course };
+      query.course = { $regex: escapeRegex(course), $options: "i" };
     }
     if (status && status !== "ALL") {
-      whereClause.status = status;
+      query.status = status;
     }
 
-    const students = await prisma.student.findMany({
-      where: whereClause,
-      include: {
-        allocations: {
-          where: { status: "ACTIVE" },
-          include: {
-            bed: {
-              include: {
-                room: {
-                  include: {
-                    floor: {
-                      include: {
-                        block: {
-                          include: {
-                            hostel: true,
-                          },
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-        complaints: {
-          where: { status: { in: ["SUBMITTED", "ASSIGNED", "IN_PROGRESS"] } },
-          select: { id: true, complaintCode: true, title: true, status: true },
-        },
-        leaveRequests: {
-          where: { status: "SUBMITTED" },
-          select: { id: true, requestCode: true, destination: true },
-        },
-      },
-      orderBy: { name: "asc" },
+    const students = await Student.find(query).sort({ name: 1 }).lean();
+    const studentIds = students.map((s) => s._id);
+
+    const [allocations, activeComplaints, pendingLeaves] = await Promise.all([
+      RoomAllocation.find({ studentId: { $in: studentIds }, status: "ACTIVE" }).lean(),
+      Complaint.find(
+        { studentId: { $in: studentIds }, status: { $in: ["SUBMITTED", "ASSIGNED", "IN_PROGRESS"] } },
+        { _id: 1, studentId: 1, complaintCode: 1, title: 1, status: 1 }
+      ).lean(),
+      LeaveRequest.find(
+        { studentId: { $in: studentIds }, status: "SUBMITTED" },
+        { _id: 1, studentId: 1, requestCode: 1, destination: 1 }
+      ).lean(),
+    ]);
+
+    const bedIds = allocations.map((a) => a.bedId);
+    const beds = await Bed.find({ _id: { $in: bedIds } }).lean();
+    const roomIds = beds.map((b) => b.roomId);
+    const rooms = await Room.find({ _id: { $in: roomIds } }).lean();
+    const floorIds = rooms.map((r) => r.floorId);
+    const floors = await Floor.find({ _id: { $in: floorIds } }).lean();
+    const blockIds = floors.map((f) => f.blockId);
+    const blocks = await Block.find({ _id: { $in: blockIds } }).lean();
+    const hostelIds = blocks.map((b) => b.hostelId);
+    const hostels = await Hostel.find({ _id: { $in: hostelIds } }).lean();
+
+    const bedMap = new Map(beds.map((b) => [b._id, b]));
+    const roomMap = new Map(rooms.map((r) => [r._id, r]));
+    const floorMap = new Map(floors.map((f) => [f._id, f]));
+    const blockMap = new Map(blocks.map((b) => [b._id, b]));
+    const hostelMap = new Map(hostels.map((h) => [h._id, h]));
+    const allocMap = new Map(allocations.map((a) => [a.studentId, a]));
+
+    const complaintCountMap = new Map<string, number>();
+    activeComplaints.forEach((c) => {
+      complaintCountMap.set(c.studentId, (complaintCountMap.get(c.studentId) || 0) + 1);
     });
 
+    const pendingLeaveSet = new Set(pendingLeaves.map((l) => l.studentId));
+
     const formatted = students.map((s) => {
-      const activeAlloc = s.allocations[0];
+      const activeAlloc = allocMap.get(s._id);
+      const bed = activeAlloc ? bedMap.get(activeAlloc.bedId) : null;
+      const room = bed ? roomMap.get(bed.roomId) : null;
+      const floor = room ? floorMap.get(room.floorId) : null;
+      const block = floor ? blockMap.get(floor.blockId) : null;
+      const hostel = block ? hostelMap.get(block.hostelId) : null;
+
       return {
-        id: s.id,
+        id: s._id,
         name: s.name,
         studentId: s.studentId,
         email: s.email,
@@ -87,18 +101,18 @@ export async function GET(req: NextRequest) {
         address: s.address,
         roomAllocation: activeAlloc
           ? {
-              allocationId: activeAlloc.id,
-              roomNumber: activeAlloc.bed.room.roomNumber,
-              bedNumber: activeAlloc.bed.bedNumber,
-              roomType: activeAlloc.bed.room.roomType,
-              floor: activeAlloc.bed.room.floor.name,
-              block: activeAlloc.bed.room.floor.block.name,
-              blockCode: activeAlloc.bed.room.floor.block.code,
-              hostel: activeAlloc.bed.room.floor.block.hostel.name,
+              allocationId: activeAlloc._id,
+              roomNumber: room?.roomNumber || "N/A",
+              bedNumber: bed?.bedNumber || "N/A",
+              roomType: room?.roomType || "N/A",
+              floor: floor?.name || "N/A",
+              block: block?.name || "N/A",
+              blockCode: block?.code || "N/A",
+              hostel: hostel?.name || "N/A",
             }
           : null,
-        activeComplaintsCount: s.complaints.length,
-        hasPendingLeave: s.leaveRequests.length > 0,
+        activeComplaintsCount: complaintCountMap.get(s._id) || 0,
+        hasPendingLeave: pendingLeaveSet.has(s._id),
       };
     });
 

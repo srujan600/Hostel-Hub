@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { SignJWT } from "jose";
-import { prisma } from "@/lib/prisma";
+import { connectToDatabase } from "@/lib/mongodb";
+import { User } from "@/models";
 import { forgotPasswordSchema } from "@/lib/validations/auth";
 import { successResponse, errorResponse } from "@/lib/api-response";
 import { BadRequestError, ForbiddenError } from "@/lib/errors";
@@ -31,10 +32,10 @@ export async function POST(req: NextRequest) {
     const { usernameOrEmail } = parseResult.data;
     const term = usernameOrEmail.toLowerCase().trim();
 
-    const user = await prisma.user.findFirst({
-      where: {
-        OR: [{ username: term }, { email: term }],
-      },
+    await connectToDatabase();
+
+    const user = await User.findOne({
+      $or: [{ username: term }, { email: term }],
     });
 
     // To prevent user enumeration, always return success message even if user doesn't exist
@@ -47,7 +48,7 @@ export async function POST(req: NextRequest) {
 
     // Generate short-lived reset token (15 minutes)
     const resetToken = await new SignJWT({
-      userId: user.id,
+      userId: user._id,
       purpose: "PASSWORD_RESET",
     })
       .setProtectedHeader({ alg: "HS256" })
@@ -56,12 +57,12 @@ export async function POST(req: NextRequest) {
       .sign(JWT_SECRET);
 
     await AuditService.record({
-      actorId: user.id,
+      actorId: user._id,
       actorRole: user.role,
       actorName: user.username,
       action: "PASSWORD_RESET_REQUESTED",
       targetType: "User",
-      targetId: user.id,
+      targetId: user._id,
       ipAddress: req.headers.get("x-forwarded-for") || undefined,
     });
 

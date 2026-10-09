@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { connectToDatabase } from "@/lib/mongodb";
+import { Notice, Student } from "@/models";
 import { requireAuth } from "@/lib/auth";
 import { successResponse, errorResponse } from "@/lib/api-response";
 import { BadRequestError, ForbiddenError } from "@/lib/errors";
@@ -20,21 +21,21 @@ export async function POST(req: NextRequest) {
       throw new BadRequestError("Title and content are required");
     }
 
-    const count = await prisma.notice.count();
+    await connectToDatabase();
+
+    const count = await Notice.countDocuments();
     const noticeCode = `NOT-2026-${String(count + 1).padStart(3, "0")}`;
 
-    const notice = await prisma.notice.create({
-      data: {
-        noticeCode,
-        title: title.trim(),
-        content: content.trim(),
-        priority: priority || "NORMAL",
-        targetAudience: targetAudience || "ALL",
-        publishedById: session.id,
-        isPublished: true,
-        publishDate: new Date(),
-        expiryDate: expiryDate ? new Date(expiryDate) : null,
-      },
+    const notice = await Notice.create({
+      noticeCode,
+      title: title.trim(),
+      content: content.trim(),
+      priority: priority || "NORMAL",
+      targetAudience: targetAudience || "ALL",
+      publishedById: session.id,
+      isPublished: true,
+      publishDate: new Date(),
+      expiryDate: expiryDate ? new Date(expiryDate) : null,
     });
 
     await AuditService.record({
@@ -43,16 +44,12 @@ export async function POST(req: NextRequest) {
       actorName: session.name,
       action: "NOTICE_PUBLISHED",
       targetType: "Notice",
-      targetId: notice.id,
+      targetId: notice._id,
       details: { code: noticeCode, title, priority, targetAudience },
       ipAddress: req.headers.get("x-forwarded-for") || undefined,
     });
 
-    // Notify all active students
-    const students = await prisma.student.findMany({
-      where: { status: "ACTIVE" },
-      select: { userId: true },
-    });
+    const students = await Student.find({ status: "ACTIVE" }, { userId: 1 }).lean();
 
     for (const s of students) {
       await NotificationService.send({
@@ -64,7 +61,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    return successResponse(notice, 201);
+    return successResponse(notice.toJSON(), 201);
   } catch (error) {
     return errorResponse(error);
   }

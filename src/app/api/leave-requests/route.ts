@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { connectToDatabase } from "@/lib/mongodb";
+import { LeaveRequest, Student } from "@/models";
 import { requireAuth } from "@/lib/auth";
 import { createLeaveRequestSchema } from "@/lib/validations/leave";
 import { successResponse, errorResponse } from "@/lib/api-response";
@@ -10,41 +11,42 @@ import { NotificationService } from "@/services/notification-service";
 export async function GET(req: NextRequest) {
   try {
     const session = await requireAuth(req);
+    await connectToDatabase();
+
     const { searchParams } = new URL(req.url);
     const status = searchParams.get("status");
 
-    const whereClause: any = {};
+    const query: any = {};
 
     // Strict student data isolation
     if (session.role === "STUDENT") {
-      const student = await prisma.student.findUnique({
-        where: { userId: session.id },
-      });
+      const student = await Student.findOne({ userId: session.id }).lean();
       if (!student) throw new NotFoundError("Student record not found");
-      whereClause.studentId = student.id;
+      query.studentId = student._id;
     }
 
     if (status && status !== "ALL") {
-      whereClause.status = status;
+      query.status = status;
     }
 
-    const leaves = await prisma.leaveRequest.findMany({
-      where: whereClause,
-      include: {
-        student: {
-          select: {
-            id: true,
-            name: true,
-            studentId: true,
-            course: true,
-            phone: true,
-          },
-        },
-      },
-      orderBy: { createdAt: "desc" },
-    });
+    const leaves = await LeaveRequest.find(query).sort({ createdAt: -1 }).lean();
+    const studentIds = [...new Set(leaves.map((l) => l.studentId))];
+    const students = await Student.find(
+      { _id: { $in: studentIds } },
+      { _id: 1, name: 1, studentId: 1, course: 1, phone: 1 }
+    ).lean();
 
-    return successResponse(leaves);
+    const studentMap = new Map(
+      students.map((s) => [s._id, { id: s._id, name: s.name, studentId: s.studentId, course: s.course, phone: s.phone }])
+    );
+
+    const formatted = leaves.map((l) => ({
+      ...l,
+      id: l._id,
+      student: studentMap.get(l.studentId) || null,
+    }));
+
+    return successResponse(formatted);
   } catch (error) {
     return errorResponse(error);
   }
@@ -62,13 +64,13 @@ export async function POST(req: NextRequest) {
 
     const { leaveType, startDate, endDate, reason, destination, emergencyContact } = parseResult.data;
 
+    await connectToDatabase();
+
     let studentId = "";
     if (session.role === "STUDENT") {
-      const student = await prisma.student.findUnique({
-        where: { userId: session.id },
-      });
+      const student = await Student.findOne({ userId: session.id }).lean();
       if (!student) throw new NotFoundError("Student record not found");
-      studentId = student.id;
+      studentId = student._id;
     } else {
       studentId = body.studentId;
       if (!studentId) throw new BadRequestError("Student ID is required");
@@ -77,35 +79,19 @@ export async function POST(req: NextRequest) {
     const start = new Date(startDate);
     const end = new Date(endDate);
 
-    // Business Rule: Departure date cannot be in the past (allowing 15m clock skew)
     const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000);
     if (start < fifteenMinutesAgo) {
       throw new BadRequestError("Departure date cannot be in the past");
     }
 
-    // Critical Business Rule: Prevent conflicting active leave requests
-    const conflictingRequest = await prisma.leaveRequest.findFirst({
-      where: {
-        studentId,
-        status: { in: ["SUBMITTED", "APPROVED"] },
-        OR: [
-          // New start is between existing start and end
-          {
-            startDate: { lte: start },
-            endDate: { gte: start },
-          },
-          // New end is between existing start and end
-          {
-            startDate: { lte: end },
-            endDate: { gte: end },
-          },
-          // New span covers existing span
-          {
-            startDate: { gte: start },
-            endDate: { lte: end },
-          },
-        ],
-      },
+    const conflictingRequest = await LeaveRequest.findOne({
+      studentId,
+      status: { $in: ["SUBMITTED", "APPROVED"] },
+      $or: [
+        { startDate: { $lte: start }, endDate: { $gte: start } },
+        { startDate: { $lte: end }, endDate: { $gte: end } },
+        { startDate: { $gte: start }, endDate: { $lte: end } },
+      ],
     });
 
     if (conflictingRequest) {
@@ -114,40 +100,34 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Generate unique request code
-    const count = await prisma.leaveRequest.count();
+    const count = await LeaveRequest.countDocuments();
     const requestCode = `LEV-2026-${String(count + 1).padStart(4, "0")}`;
 
-    const leave = await prisma.leaveRequest.create({
-      data: {
-        requestCode,
-        studentId,
-        leaveType,
-        startDate: start,
-        endDate: end,
-        reason,
-        destination,
-        emergencyContact,
-        status: "SUBMITTED",
-      },
-      include: {
-        student: true,
-      },
+    const leave = await LeaveRequest.create({
+      requestCode,
+      studentId,
+      leaveType,
+      startDate: start,
+      endDate: end,
+      reason,
+      destination,
+      emergencyContact,
+      status: "SUBMITTED",
     });
 
-    // Audit log
+    const studentRecord = await Student.findById(studentId).lean();
+
     await AuditService.record({
       actorId: session.id,
       actorRole: session.role,
       actorName: session.name,
       action: "LEAVE_REQUEST_SUBMITTED",
       targetType: "LeaveRequest",
-      targetId: leave.id,
+      targetId: leave._id,
       details: { code: requestCode, leaveType, start, end, destination },
       ipAddress: req.headers.get("x-forwarded-for") || undefined,
     });
 
-    // Notification to student
     await NotificationService.send({
       userId: session.id,
       title: "Out-Pass Request Lodged",
@@ -156,7 +136,13 @@ export async function POST(req: NextRequest) {
       linkUrl: `/student/leave`,
     });
 
-    return successResponse(leave, 201);
+    return successResponse(
+      {
+        ...leave.toJSON(),
+        student: studentRecord ? { ...studentRecord, id: studentRecord._id } : null,
+      },
+      201
+    );
   } catch (error) {
     return errorResponse(error);
   }

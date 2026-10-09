@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { connectToDatabase } from "@/lib/mongodb";
+import { Attendance, Student } from "@/models";
 import { requireAuth } from "@/lib/auth";
 import { successResponse, errorResponse } from "@/lib/api-response";
 import { ForbiddenError } from "@/lib/errors";
@@ -11,7 +12,8 @@ export async function GET(req: NextRequest) {
       throw new ForbiddenError("Forbidden: Staff authorization required");
     }
 
-    // 1. Fetch attendance records from past 7 days
+    await connectToDatabase();
+
     const today = new Date();
     const past7Days: string[] = [];
     for (let i = 6; i >= 0; i--) {
@@ -20,31 +22,25 @@ export async function GET(req: NextRequest) {
       past7Days.push(d.toISOString().split("T")[0]);
     }
 
-    const records = await prisma.attendance.findMany({
-      where: {
-        date: { in: past7Days },
-      },
-      include: {
-        student: {
-          select: {
-            id: true,
-            name: true,
-            studentId: true,
-            phone: true,
-            emergencyContactPhone: true,
-          },
-        },
-      },
-    });
+    const records = await Attendance.find({ date: { $in: past7Days } }).lean();
 
-    // 2. Count absences per student in the last 7 days
+    const studentIds = [...new Set(records.map((r) => r.studentId))];
+    const students = await Student.find(
+      { _id: { $in: studentIds } },
+      { _id: 1, name: 1, studentId: 1, phone: 1, emergencyContactPhone: 1 }
+    ).lean();
+
+    const studentMap = new Map(
+      students.map((s) => [s._id, { id: s._id, name: s.name, studentId: s.studentId, phone: s.phone, emergencyContactPhone: s.emergencyContactPhone }])
+    );
+
     const studentAbsenceMap: Record<string, { count: number; student: any; dates: string[] }> = {};
     records.forEach((r) => {
       if (r.status === "ABSENT") {
         if (!studentAbsenceMap[r.studentId]) {
           studentAbsenceMap[r.studentId] = {
             count: 0,
-            student: r.student,
+            student: studentMap.get(r.studentId) || null,
             dates: [],
           };
         }
@@ -53,12 +49,10 @@ export async function GET(req: NextRequest) {
       }
     });
 
-    // Flag repeat absentees (absence count >= 2)
     const repeatAbsentees = Object.values(studentAbsenceMap)
       .filter((s) => s.count >= 2)
       .sort((a, b) => b.count - a.count);
 
-    // 3. Daily compliance breakdown
     const dailyStats = past7Days.map((dateStr) => {
       const dayRecs = records.filter((r) => r.date === dateStr);
       const present = dayRecs.filter((r) => r.status === "PRESENT").length;

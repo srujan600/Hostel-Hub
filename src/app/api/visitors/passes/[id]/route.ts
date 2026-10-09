@@ -1,8 +1,9 @@
 import { NextRequest } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { connectToDatabase } from "@/lib/mongodb";
+import { VisitorPass, Visitor, Student } from "@/models";
 import { requireAuth } from "@/lib/auth";
 import { successResponse, errorResponse } from "@/lib/api-response";
-import { BadRequestError, ForbiddenError, NotFoundError } from "@/lib/errors";
+import { ForbiddenError, NotFoundError } from "@/lib/errors";
 import { AuditService } from "@/services/audit-service";
 
 export async function PATCH(
@@ -25,52 +26,38 @@ export async function PATCH(
     const body = await req.json();
     const { status, remarks } = body;
 
-    const pass = await prisma.visitorPass.findUnique({
-      where: { id },
-      include: {
-        visitor: {
-          include: {
-            student: true,
-          },
-        },
-      },
-    });
+    await connectToDatabase();
 
+    const pass = await VisitorPass.findById(id);
     if (!pass) {
       throw new NotFoundError("Visitor pass not found");
     }
 
-    const updateData: any = {};
+    const previousStatus = pass.status;
+
     if (remarks !== undefined) {
-      updateData.remarks = remarks;
+      pass.remarks = remarks;
     }
 
     if (status) {
-      updateData.status = status;
+      pass.status = status;
       if (status === "APPROVED" || status === "REJECTED") {
-        updateData.approvedById = session.id;
+        pass.approvedById = session.id;
       } else if (status === "CHECKED_IN") {
         if (!pass.actualEntryTime) {
-          updateData.actualEntryTime = new Date();
+          pass.actualEntryTime = new Date();
         }
       } else if (status === "CHECKED_OUT") {
         if (!pass.actualExitTime) {
-          updateData.actualExitTime = new Date();
+          pass.actualExitTime = new Date();
         }
       }
     }
 
-    const updatedPass = await prisma.visitorPass.update({
-      where: { id },
-      data: updateData,
-      include: {
-        visitor: {
-          include: {
-            student: true,
-          },
-        },
-      },
-    });
+    await pass.save();
+
+    const visitor = await Visitor.findById(pass.visitorId).lean();
+    const student = visitor ? await Student.findById(visitor.studentId).lean() : null;
 
     await AuditService.record({
       actorId: session.id,
@@ -78,12 +65,21 @@ export async function PATCH(
       actorName: session.name,
       action: `VISITOR_PASS_${status || "UPDATED"}`,
       targetType: "VisitorPass",
-      targetId: id,
-      details: { passCode: pass.passCode, previousStatus: pass.status, newStatus: status, remarks },
+      targetId: pass._id,
+      details: { passCode: pass.passCode, previousStatus, newStatus: status, remarks },
       ipAddress: req.headers.get("x-forwarded-for") || undefined,
     });
 
-    return successResponse(updatedPass);
+    return successResponse({
+      ...pass.toJSON(),
+      visitor: visitor
+        ? {
+            ...visitor,
+            id: visitor._id,
+            student: student ? { ...student, id: student._id } : null,
+          }
+        : null,
+    });
   } catch (error) {
     return errorResponse(error);
   }

@@ -1,46 +1,34 @@
 import { NextRequest } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { connectToDatabase } from "@/lib/mongodb";
+import { Notice } from "@/models";
 import { requireAuth } from "@/lib/auth";
 import { successResponse, errorResponse } from "@/lib/api-response";
 
 export async function GET(req: NextRequest) {
   try {
     const session = await requireAuth(req);
+    await connectToDatabase();
+
     const { searchParams } = new URL(req.url);
     const priority = searchParams.get("priority");
 
     const now = new Date();
-    const whereClause: any = {
+    const query: any = {
       isPublished: true,
-      AND: [
-        {
-          OR: [
-            { expiryDate: null },
-            { expiryDate: { gte: now } },
-          ],
-        },
-      ],
+      $or: [{ expiryDate: null }, { expiryDate: { $gte: now } }],
     };
 
     if (session.role === "STUDENT") {
-      whereClause.AND.push({
-        OR: [
-          { targetAudience: "ALL" },
-          { targetAudience: "STUDENTS" },
-        ],
-      });
+      query.targetAudience = { $in: ["ALL", "STUDENTS"] };
     }
 
     if (priority && priority !== "ALL") {
-      whereClause.priority = priority;
+      query.priority = priority;
     }
 
-    const notices = await prisma.notice.findMany({
-      where: whereClause,
-      orderBy: { publishDate: "desc" },
-    });
+    const notices = await Notice.find(query).sort({ publishDate: -1 }).lean();
 
-    return successResponse(notices);
+    return successResponse(notices.map((n) => ({ ...n, id: n._id })));
   } catch (error) {
     return errorResponse(error);
   }

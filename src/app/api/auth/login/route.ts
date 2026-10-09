@@ -1,5 +1,6 @@
-import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { NextRequest } from "next/server";
+import { connectToDatabase } from "@/lib/mongodb";
+import { User, Student, Staff } from "@/models";
 import { verifyPassword, signToken } from "@/lib/auth";
 import { loginSchema } from "@/lib/validations/auth";
 import { checkRateLimit, resetRateLimit } from "@/lib/rate-limit";
@@ -29,14 +30,10 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    await connectToDatabase();
+
     // Lookup user in database
-    const user = await prisma.user.findUnique({
-      where: { username: username.toLowerCase().trim() },
-      include: {
-        student: true,
-        staff: true,
-      },
-    });
+    const user = await User.findOne({ username: username.toLowerCase().trim() });
 
     if (!user) {
       throw new UnauthorizedError("Invalid username or password");
@@ -64,17 +61,23 @@ export async function POST(req: NextRequest) {
     let staffId: string | undefined;
     let hostelId: string | undefined;
 
-    if (user.role === "STUDENT" && user.student) {
-      displayName = user.student.name;
-      studentId = user.student.studentId;
-    } else if (user.staff) {
-      displayName = user.staff.name;
-      staffId = user.staff.employeeId;
-      hostelId = user.staff.assignedHostelId || undefined;
+    if (user.role === "STUDENT") {
+      const studentProfile = await Student.findOne({ userId: user._id });
+      if (studentProfile) {
+        displayName = studentProfile.name;
+        studentId = studentProfile.studentId;
+      }
+    } else {
+      const staffProfile = await Staff.findOne({ userId: user._id });
+      if (staffProfile) {
+        displayName = staffProfile.name;
+        staffId = staffProfile.employeeId;
+        hostelId = staffProfile.assignedHostelId || undefined;
+      }
     }
 
     const sessionPayload: UserSession = {
-      id: user.id,
+      id: user._id,
       username: user.username,
       name: displayName,
       email: user.email,
@@ -108,12 +111,12 @@ export async function POST(req: NextRequest) {
 
     // Audit log
     await AuditService.record({
-      actorId: user.id,
+      actorId: user._id,
       actorRole: user.role,
       actorName: displayName,
       action: "USER_LOGIN",
       targetType: "User",
-      targetId: user.id,
+      targetId: user._id,
       ipAddress: ip,
       userAgent: req.headers.get("user-agent") || undefined,
     });

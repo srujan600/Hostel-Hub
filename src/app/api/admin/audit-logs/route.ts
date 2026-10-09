@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { connectToDatabase } from "@/lib/mongodb";
+import { AuditLog } from "@/models";
 import { requireAuth } from "@/lib/auth";
 import { successResponse, errorResponse } from "@/lib/api-response";
 import { ForbiddenError } from "@/lib/errors";
@@ -18,16 +19,14 @@ export async function GET(req: NextRequest) {
     const targetType = searchParams.get("targetType");
     const limit = Number(searchParams.get("limit")) || 100;
 
-    const whereClause: any = {};
-    if (action && action !== "ALL") whereClause.action = action;
-    if (actorRole && actorRole !== "ALL") whereClause.actorRole = actorRole;
-    if (targetType && targetType !== "ALL") whereClause.targetType = targetType;
+    await connectToDatabase();
 
-    const logs = await prisma.auditLog.findMany({
-      where: whereClause,
-      orderBy: { createdAt: "desc" },
-      take: limit,
-    });
+    const query: any = {};
+    if (action && action !== "ALL") query.action = action;
+    if (actorRole && actorRole !== "ALL") query.actorRole = actorRole;
+    if (targetType && targetType !== "ALL") query.targetType = targetType;
+
+    const logs = await AuditLog.find(query).sort({ createdAt: -1 }).limit(limit).lean();
 
     let filtered = logs;
     if (search) {
@@ -40,22 +39,16 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    // Metadata for filter dropdowns
-    const distinctActions = await prisma.auditLog.groupBy({
-      by: ["action"],
-      _count: { id: true },
-    });
-
-    const distinctTargets = await prisma.auditLog.groupBy({
-      by: ["targetType"],
-      _count: { id: true },
-    });
+    const [distinctActions, distinctTargets] = await Promise.all([
+      AuditLog.distinct("action"),
+      AuditLog.distinct("targetType"),
+    ]);
 
     return successResponse({
-      logs: filtered,
+      logs: filtered.map((l) => ({ ...l, id: l._id })),
       totalCount: filtered.length,
-      availableActions: distinctActions.map((a) => a.action),
-      availableTargets: distinctTargets.map((t) => t.targetType),
+      availableActions: distinctActions,
+      availableTargets: distinctTargets,
     });
   } catch (error) {
     return errorResponse(error);

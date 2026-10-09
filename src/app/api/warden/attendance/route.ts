@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { connectToDatabase } from "@/lib/mongodb";
+import { Attendance, Student, RoomAllocation, Bed, Room } from "@/models";
 import { requireAuth } from "@/lib/auth";
 import { successResponse, errorResponse } from "@/lib/api-response";
 import { BadRequestError, ForbiddenError } from "@/lib/errors";
@@ -15,38 +16,46 @@ export async function GET(req: NextRequest) {
     const { searchParams } = new URL(req.url);
     const date = searchParams.get("date") || new Date().toISOString().split("T")[0];
 
-    // Fetch all active residents
-    const students = await prisma.student.findMany({
-      where: { status: "ACTIVE" },
-      include: {
-        allocations: {
-          where: { status: "ACTIVE" },
-          include: {
-            bed: {
-              include: {
-                room: true,
-              },
-            },
-          },
-        },
-        attendanceRecords: {
-          where: { date },
-        },
-      },
-      orderBy: { name: "asc" },
-    });
+    await connectToDatabase();
+
+    const students = await Student.find({ status: "ACTIVE" }).sort({ name: 1 }).lean();
+    const studentIds = students.map((s) => s._id);
+
+    const [allocations, attendanceRecords] = await Promise.all([
+      RoomAllocation.find({ studentId: { $in: studentIds }, status: "ACTIVE" }).lean(),
+      Attendance.find({ studentId: { $in: studentIds }, date }).lean(),
+    ]);
+
+    const bedIds = allocations.map((a) => a.bedId);
+    const beds = await Bed.find({ _id: { $in: bedIds } }).lean();
+    const roomIds = beds.map((b) => b.roomId);
+    const rooms = await Room.find({ _id: { $in: roomIds } }).lean();
+
+    const roomMap = new Map(rooms.map((r) => [r._id, r]));
+    const bedMap = new Map(beds.map((b) => [b._id, b]));
+    const allocMap = new Map(allocations.map((a) => [a.studentId, a]));
+    const attendMap = new Map(attendanceRecords.map((ar) => [ar.studentId, ar]));
 
     const roster = students.map((s) => {
-      const record = s.attendanceRecords[0];
-      const alloc = s.allocations[0];
+      const record = attendMap.get(s._id);
+      const alloc = allocMap.get(s._id);
+      let roomLabel = "Unallocated";
+      if (alloc) {
+        const bed = bedMap.get(alloc.bedId);
+        const room = bed ? roomMap.get(bed.roomId) : null;
+        if (room && bed) {
+          roomLabel = `${room.roomNumber}-${bed.bedNumber}`;
+        }
+      }
+
       return {
-        studentId: s.id,
+        studentId: s._id,
         name: s.name,
         rollNumber: s.studentId,
-        roomNumber: alloc ? `${alloc.bed.room.roomNumber}-${alloc.bed.bedNumber}` : "Unallocated",
+        roomNumber: roomLabel,
         status: record ? record.status : "UNMARKED",
         remarks: record ? record.remarks : "",
-        recordId: record ? record.id : null,
+        recordId: record ? record._id : null,
       };
     });
 
@@ -64,37 +73,29 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
+    await connectToDatabase();
 
-    // Support 1: Mark all active residents or batch list
     if (body.markAllPresent && body.date) {
-      const activeStudents = await prisma.student.findMany({
-        where: { status: "ACTIVE" },
-        select: { id: true },
-      });
+      const activeStudents = await Student.find({ status: "ACTIVE" }, { _id: 1 }).lean();
 
-      const records = [];
-      for (const st of activeStudents) {
-        const rec = await prisma.attendance.upsert({
-          where: {
-            studentId_date: {
-              studentId: st.id,
-              date: body.date,
+      const ops = activeStudents.map((st) => ({
+        updateOne: {
+          filter: { studentId: st._id, date: body.date },
+          update: {
+            $set: {
+              status: "PRESENT",
+              isCorrected: true,
+              correctedById: session.id,
+            },
+            $setOnInsert: {
+              markedById: session.id,
             },
           },
-          update: {
-            status: "PRESENT",
-            isCorrected: true,
-            correctedById: session.id,
-          },
-          create: {
-            studentId: st.id,
-            date: body.date,
-            status: "PRESENT",
-            markedById: session.id,
-          },
-        });
-        records.push(rec);
-      }
+          upsert: true,
+        },
+      }));
+
+      await Attendance.bulkWrite(ops);
 
       await AuditService.record({
         actorId: session.id,
@@ -103,72 +104,62 @@ export async function POST(req: NextRequest) {
         action: "ATTENDANCE_BATCH_ALL_PRESENT",
         targetType: "Attendance",
         targetId: body.date,
-        details: { count: records.length, date: body.date },
+        details: { count: activeStudents.length, date: body.date },
         ipAddress: req.headers.get("x-forwarded-for") || undefined,
       });
 
-      return successResponse({ count: records.length, message: `Marked all ${records.length} residents as Present.` });
+      return successResponse({
+        count: activeStudents.length,
+        message: `Marked all ${activeStudents.length} residents as Present.`,
+      });
     }
 
     if (body.batch && Array.isArray(body.batch)) {
-      const results = [];
-      for (const item of body.batch) {
-        if (!item.studentId || !item.status) continue;
-        const rec = await prisma.attendance.upsert({
-          where: {
-            studentId_date: {
-              studentId: item.studentId,
-              date: body.date,
+      const ops = body.batch
+        .filter((item: any) => item.studentId && item.status)
+        .map((item: any) => ({
+          updateOne: {
+            filter: { studentId: item.studentId, date: body.date },
+            update: {
+              $set: {
+                status: item.status,
+                remarks: item.remarks || null,
+                isCorrected: true,
+                correctedById: session.id,
+              },
+              $setOnInsert: {
+                markedById: session.id,
+              },
             },
+            upsert: true,
           },
-          update: {
-            status: item.status,
-            remarks: item.remarks || null,
-            isCorrected: true,
-            correctedById: session.id,
-          },
-          create: {
-            studentId: item.studentId,
-            date: body.date,
-            status: item.status,
-            markedById: session.id,
-            remarks: item.remarks || null,
-          },
-        });
-        results.push(rec);
-      }
-      return successResponse({ count: results.length, records: results });
+        }));
+
+      await Attendance.bulkWrite(ops);
+      return successResponse({ count: ops.length, message: "Batch attendance saved." });
     }
 
-    // Support 2: Single student record update
     const { date, studentId, status, remarks } = body;
 
     if (!date || !studentId || !status) {
       throw new BadRequestError("Date, studentId, and status are required");
     }
 
-    // Upsert attendance record
-    const record = await prisma.attendance.upsert({
-      where: {
-        studentId_date: {
-          studentId,
-          date,
+    const record = await Attendance.findOneAndUpdate(
+      { studentId, date },
+      {
+        $set: {
+          status,
+          remarks: remarks || null,
+          isCorrected: true,
+          correctedById: session.id,
+        },
+        $setOnInsert: {
+          markedById: session.id,
         },
       },
-      update: {
-        status,
-        remarks: remarks || null,
-        isCorrected: true,
-        correctedById: session.id,
-      },
-      create: {
-        studentId,
-        date,
-        status,
-        markedById: session.id,
-        remarks: remarks || null,
-      },
-    });
+      { upsert: true, returnDocument: "after" }
+    );
 
     await AuditService.record({
       actorId: session.id,
@@ -176,12 +167,12 @@ export async function POST(req: NextRequest) {
       actorName: session.name,
       action: "ATTENDANCE_MARKED",
       targetType: "Attendance",
-      targetId: record.id,
+      targetId: record._id,
       details: { studentId, date, status, remarks },
       ipAddress: req.headers.get("x-forwarded-for") || undefined,
     });
 
-    return successResponse(record);
+    return successResponse(record.toJSON());
   } catch (error) {
     return errorResponse(error);
   }
