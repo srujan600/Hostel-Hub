@@ -28,24 +28,71 @@ export async function GET(req: NextRequest) {
 
     await connectToDatabase();
 
-    // 1. Bed Occupancy Telemetry
-    const [totalBeds, occupiedBeds, vacantBeds, maintenanceBeds] = await Promise.all([
-      Bed.countDocuments(),
-      Bed.countDocuments({ status: "OCCUPIED" }),
-      Bed.countDocuments({ status: "AVAILABLE" }),
-      Bed.countDocuments({ status: "MAINTENANCE" }),
-    ]);
-    const occupancyRate = totalBeds > 0 ? Math.round((occupiedBeds / totalBeds) * 100) : 0;
+    // 1. Stage 1: Parallel fetch all primary telemetry and collection queries
+    const todayStr = new Date().toISOString().split("T")[0];
 
-    // 2. Pending Leave & Out-Pass Count
-    const pendingLeaves = await LeaveRequest.find({ status: "SUBMITTED" })
-      .sort({ createdAt: -1 })
-      .lean();
+    const [
+      [totalBeds, occupiedBeds, vacantBeds, maintenanceBeds],
+      pendingLeaves,
+      openComplaints,
+      totalOpenComplaints,
+      todayAttendanceRecords,
+      todayVisitors,
+      residents,
+      curfew,
+    ] = await Promise.all([
+      Promise.all([
+        Bed.countDocuments(),
+        Bed.countDocuments({ status: "OCCUPIED" }),
+        Bed.countDocuments({ status: "AVAILABLE" }),
+        Bed.countDocuments({ status: "MAINTENANCE" }),
+      ]),
+      LeaveRequest.find({ status: "SUBMITTED" }).sort({ createdAt: -1 }).lean(),
+      Complaint.find({
+        status: { $in: ["SUBMITTED", "ASSIGNED", "IN_PROGRESS"] },
+      })
+        .sort({ createdAt: -1 })
+        .limit(6)
+        .lean(),
+      Complaint.countDocuments({
+        status: { $in: ["SUBMITTED", "ASSIGNED", "IN_PROGRESS"] },
+      }),
+      Attendance.find({ date: todayStr }).lean(),
+      VisitorPass.find({
+        status: { $in: ["PENDING", "APPROVED", "CHECKED_IN"] },
+      })
+        .sort({ expectedEntryTime: -1 })
+        .lean(),
+      Student.find().sort({ name: 1 }).limit(8).lean(),
+      SystemSetting.findOne({ key: "CURFEW_TIME" }).lean(),
+    ]);
+
+    const occupancyRate = totalBeds > 0 ? Math.round((occupiedBeds / totalBeds) * 100) : 0;
+    const presentCount = todayAttendanceRecords.filter((a) => a.status === "PRESENT").length;
+    const absentCount = todayAttendanceRecords.filter((a) => a.status === "ABSENT").length;
+    const excusedCount = todayAttendanceRecords.filter((a) => a.status === "EXCUSED").length;
+
+    // 2. Stage 2: Parallel fetch enrichment entities for leaves, complaints, visitors, and residents
     const leaveStudentIds = pendingLeaves.map((l) => l.studentId);
-    const leaveStudents = await Student.find(
-      { _id: { $in: leaveStudentIds } },
-      { _id: 1, name: 1, studentId: 1, course: 1 }
-    ).lean();
+    const cStudentIds = openComplaints.map((c) => c.studentId);
+    const cStaffIds = openComplaints.map((c) => c.assignedStaffId).filter((id): id is string => Boolean(id));
+    const visitorIds = todayVisitors.map((v) => v.visitorId);
+    const rStudentIds = residents.map((r) => r._id);
+
+    const [leaveStudents, cStudents, cStaffs, visitors, rAllocations] = await Promise.all([
+      Student.find(
+        { _id: { $in: leaveStudentIds } },
+        { _id: 1, name: 1, studentId: 1, course: 1 }
+      ).lean(),
+      Student.find({ _id: { $in: cStudentIds } }).select("_id name studentId").lean(),
+      Staff.find({ _id: { $in: cStaffIds } }).select("_id name").lean(),
+      Visitor.find({ _id: { $in: visitorIds } }).lean(),
+      RoomAllocation.find({
+        studentId: { $in: rStudentIds },
+        status: "ACTIVE",
+      }).lean(),
+    ]);
+
     const leaveStudentMap = new Map(
       leaveStudents.map((s) => [s._id, { id: s._id, name: s.name, studentId: s.studentId, course: s.course }])
     );
@@ -55,25 +102,6 @@ export async function GET(req: NextRequest) {
       student: leaveStudentMap.get(l.studentId) || null,
     }));
 
-    // 3. Open Maintenance Complaints
-    const openComplaints = await Complaint.find({
-      status: { $in: ["SUBMITTED", "ASSIGNED", "IN_PROGRESS"] },
-    })
-      .sort({ createdAt: -1 })
-      .limit(6)
-      .lean();
-
-    const totalOpenComplaints = await Complaint.countDocuments({
-      status: { $in: ["SUBMITTED", "ASSIGNED", "IN_PROGRESS"] },
-    });
-
-    const cStudentIds = openComplaints.map((c) => c.studentId);
-    const cStaffIds = openComplaints.map((c) => c.assignedStaffId).filter((id): id is string => Boolean(id));
-
-    const [cStudents, cStaffs] = await Promise.all([
-      Student.find({ _id: { $in: cStudentIds } }).select("_id name studentId").lean(),
-      Staff.find({ _id: { $in: cStaffIds } }).select("_id name").lean(),
-    ]);
     const cStudentMap = new Map(cStudents.map((s: any) => [s._id, { name: s.name, studentId: s.studentId }]));
     const cStaffMap = new Map(cStaffs.map((st: any) => [st._id, { name: st.name }]));
 
@@ -84,28 +112,18 @@ export async function GET(req: NextRequest) {
       assignedStaff: c.assignedStaffId ? cStaffMap.get(c.assignedStaffId) || null : null,
     }));
 
-    // 4. Today's Attendance Summary
-    const todayStr = new Date().toISOString().split("T")[0];
-    const todayAttendanceRecords = await Attendance.find({ date: todayStr }).lean();
-    const presentCount = todayAttendanceRecords.filter((a) => a.status === "PRESENT").length;
-    const absentCount = todayAttendanceRecords.filter((a) => a.status === "ABSENT").length;
-    const excusedCount = todayAttendanceRecords.filter((a) => a.status === "EXCUSED").length;
-
-    // 5. Today's Visitors
-    const todayVisitors = await VisitorPass.find({
-      status: { $in: ["PENDING", "APPROVED", "CHECKED_IN"] },
-    })
-      .sort({ expectedEntryTime: -1 })
-      .lean();
-
-    const visitorIds = todayVisitors.map((v) => v.visitorId);
-    const visitors = await Visitor.find({ _id: { $in: visitorIds } }).lean();
+    // 3. Stage 3: Nested relations for visitors & resident allocations
     const vStudentIds = visitors.map((v) => v.studentId);
-    const vStudents = await Student.find({ _id: { $in: vStudentIds } }, { _id: 1, name: 1, studentId: 1 }).lean();
+    const rBedIds = rAllocations.map((a) => a.bedId);
 
-    const vStudentMap = new Map(vStudents.map((s) => [s._id, { name: s.name, studentId: s.studentId }]));
+    const [vStudents, rBeds] = await Promise.all([
+      Student.find({ _id: { $in: vStudentIds } }, { _id: 1, name: 1, studentId: 1 }).lean(),
+      Bed.find({ _id: { $in: rBedIds } }).lean(),
+    ]);
+
+    const vStudentMap = new Map(vStudents.map((s: any) => [s._id, { name: s.name, studentId: s.studentId }]));
     const visitorMap = new Map(
-      visitors.map((v) => [
+      visitors.map((v: any) => [
         v._id,
         {
           ...v,
@@ -115,22 +133,12 @@ export async function GET(req: NextRequest) {
       ])
     );
 
-    const enrichedVisitors = todayVisitors.map((vp) => ({
+    const enrichedVisitors = todayVisitors.map((vp: any) => ({
       ...vp,
       id: vp._id,
       visitor: visitorMap.get(vp.visitorId) || null,
     }));
 
-    // 6. Recent Active Residents
-    const residents = await Student.find().sort({ name: 1 }).limit(8).lean();
-    const rStudentIds = residents.map((r) => r._id);
-    const rAllocations = await RoomAllocation.find({
-      studentId: { $in: rStudentIds },
-      status: "ACTIVE",
-    }).lean();
-
-    const rBedIds = rAllocations.map((a) => a.bedId);
-    const rBeds = await Bed.find({ _id: { $in: rBedIds } }).lean();
     const rRoomIds = rBeds.map((b) => b.roomId);
     const rRooms = await Room.find({ _id: { $in: rRoomIds } }).lean();
     const rFloorIds = rRooms.map((r) => r.floorId);
@@ -162,9 +170,6 @@ export async function GET(req: NextRequest) {
         block: block ? block.code : "N/A",
       };
     });
-
-    // 7. System Curfew
-    const curfew = await SystemSetting.findOne({ key: "CURFEW_TIME" }).lean();
 
     return successResponse({
       telemetry: {

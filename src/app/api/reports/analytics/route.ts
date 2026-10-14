@@ -24,62 +24,97 @@ export async function GET(req: NextRequest) {
 
     const now = new Date();
     const fortyEightHoursAgo = new Date(Date.now() - 48 * 60 * 60 * 1000);
-
-    // 1. Occupancy & Bed Distribution
-    const totalBeds = await Bed.countDocuments();
-    const occupiedBeds = await Bed.countDocuments({ status: "OCCUPIED" });
-    const availableBeds = await Bed.countDocuments({ status: "AVAILABLE" });
-    const maintenanceBeds = await Bed.countDocuments({ status: "MAINTENANCE" });
-    const occupancyRate = totalBeds > 0 ? Math.round((occupiedBeds / totalBeds) * 100) : 0;
-
-    const roomsByType = await Room.aggregate([
-      {
-        $group: {
-          _id: "$roomType",
-          count: { $sum: 1 },
-          capacity: { $sum: "$capacity" },
-          occupiedBeds: { $sum: "$occupiedBeds" },
-        },
-      },
-    ]);
-
-    // 2. Complaint & Maintenance SLA Analytics
-    const totalComplaints = await Complaint.countDocuments();
-    const resolvedComplaints = await Complaint.countDocuments({
-      status: { $in: ["RESOLVED", "CLOSED"] },
-    });
-    const openComplaints = await Complaint.countDocuments({
-      status: { $in: ["SUBMITTED", "ASSIGNED", "IN_PROGRESS"] },
-    });
-    const agingComplaints = await Complaint.countDocuments({
-      status: { $in: ["SUBMITTED", "ASSIGNED", "IN_PROGRESS"] },
-      createdAt: { $lte: fortyEightHoursAgo },
-    });
-
-    const resolutionRate = totalComplaints > 0 ? Math.round((resolvedComplaints / totalComplaints) * 100) : 100;
-
-    const complaintsByCategory = await Complaint.aggregate([
-      {
-        $group: {
-          _id: "$category",
-          count: { $sum: 1 },
-        },
-      },
-    ]);
-
-    const complaintsByPriority = await Complaint.aggregate([
-      {
-        $group: {
-          _id: "$priority",
-          count: { $sum: 1 },
-        },
-      },
-    ]);
-
-    // 3. Attendance & Curfew Compliance (Last 30 Days)
     const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
-    const attendanceRecords = await Attendance.find({ date: { $gte: thirtyDaysAgo } }).lean();
 
+    // Parallelize all analytics and metrics queries in a single concurrent batch
+    const [
+      totalBeds,
+      occupiedBeds,
+      availableBeds,
+      maintenanceBeds,
+      roomsByType,
+      totalComplaints,
+      resolvedComplaints,
+      openComplaints,
+      agingComplaints,
+      complaintsByCategory,
+      complaintsByPriority,
+      attendanceRecords,
+      totalVisitorPasses,
+      activeVisitorsOnCampus,
+      completedVisitorVisits,
+      totalLeaves,
+      approvedLeaves,
+      rejectedLeaves,
+      leavesByType,
+    ] = await Promise.all([
+      Bed.countDocuments(),
+      Bed.countDocuments({ status: "OCCUPIED" }),
+      Bed.countDocuments({ status: "AVAILABLE" }),
+      Bed.countDocuments({ status: "MAINTENANCE" }),
+      Room.aggregate([
+        {
+          $group: {
+            _id: "$roomType",
+            count: { $sum: 1 },
+            capacity: { $sum: "$capacity" },
+            occupiedBeds: { $sum: "$occupiedBeds" },
+          },
+        },
+      ]),
+      Complaint.countDocuments(),
+      Complaint.countDocuments({
+        status: { $in: ["RESOLVED", "CLOSED"] },
+      }),
+      Complaint.countDocuments({
+        status: { $in: ["SUBMITTED", "ASSIGNED", "IN_PROGRESS"] },
+      }),
+      Complaint.countDocuments({
+        status: { $in: ["SUBMITTED", "ASSIGNED", "IN_PROGRESS"] },
+        createdAt: { $lte: fortyEightHoursAgo },
+      }),
+      Complaint.aggregate([
+        {
+          $group: {
+            _id: "$category",
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+      Complaint.aggregate([
+        {
+          $group: {
+            _id: "$priority",
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+      Attendance.find({ date: { $gte: thirtyDaysAgo } }).lean(),
+      VisitorPass.countDocuments(),
+      VisitorPass.countDocuments({
+        status: "CHECKED_IN",
+      }),
+      VisitorPass.countDocuments({
+        status: "CHECKED_OUT",
+      }),
+      LeaveRequest.countDocuments(),
+      LeaveRequest.countDocuments({ status: "APPROVED" }),
+      LeaveRequest.countDocuments({ status: "REJECTED" }),
+      LeaveRequest.aggregate([
+        {
+          $group: {
+            _id: "$leaveType",
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+    ]);
+
+    const occupancyRate = totalBeds > 0 ? Math.round((occupiedBeds / totalBeds) * 100) : 0;
+    const resolutionRate = totalComplaints > 0 ? Math.round((resolvedComplaints / totalComplaints) * 100) : 100;
+    const approvalRate = totalLeaves > 0 ? Math.round((approvedLeaves / totalLeaves) * 100) : 0;
+
+    // Student identity enrichment for attendance
     const studentIds = Array.from(new Set(attendanceRecords.map((a) => a.studentId)));
     const students = await Student.find({ _id: { $in: studentIds } })
       .select("name studentId")
@@ -114,30 +149,6 @@ export async function GET(req: NextRequest) {
     const repeatAbsentees = Object.values(absenceCounts)
       .filter((s) => s.count >= 2)
       .sort((a, b) => b.count - a.count);
-
-    // 4. Visitor Gate Analytics
-    const totalVisitorPasses = await VisitorPass.countDocuments();
-    const activeVisitorsOnCampus = await VisitorPass.countDocuments({
-      status: "CHECKED_IN",
-    });
-    const completedVisitorVisits = await VisitorPass.countDocuments({
-      status: "CHECKED_OUT",
-    });
-
-    // 5. Leave & Outings Analytics
-    const totalLeaves = await LeaveRequest.countDocuments();
-    const approvedLeaves = await LeaveRequest.countDocuments({ status: "APPROVED" });
-    const rejectedLeaves = await LeaveRequest.countDocuments({ status: "REJECTED" });
-    const approvalRate = totalLeaves > 0 ? Math.round((approvedLeaves / totalLeaves) * 100) : 0;
-
-    const leavesByType = await LeaveRequest.aggregate([
-      {
-        $group: {
-          _id: "$leaveType",
-          count: { $sum: 1 },
-        },
-      },
-    ]);
 
     return successResponse({
       occupancy: {

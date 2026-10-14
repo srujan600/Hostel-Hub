@@ -85,10 +85,12 @@ export async function connectToDatabase(): Promise<typeof mongoose> {
     const opts: mongoose.ConnectOptions = {
       serverSelectionTimeoutMS,
       socketTimeoutMS,
+      connectTimeoutMS: 5000,
       maxPoolSize,
       minPoolSize,
+      maxIdleTimeMS: 30000,
       bufferCommands: false,
-      autoIndex: process.env.NODE_ENV !== "production",
+      autoIndex: false, // CRITICAL: Never run index builds during runtime requests
       ...(process.env.MONGODB_DB_NAME ? { dbName: process.env.MONGODB_DB_NAME } : {}),
     };
 

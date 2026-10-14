@@ -17,42 +17,71 @@ export async function GET(req: NextRequest) {
     const todayStr = new Date().toISOString().split("T")[0];
     const now = new Date();
 
-    // 1. Bed & Room Occupancy
-    const [totalRooms, totalBeds, occupiedBeds, availableBeds, maintenanceBeds] = await Promise.all([
+    const todayStart = new Date(todayStr);
+    const tomorrowStart = new Date(todayStart);
+    tomorrowStart.setDate(tomorrowStart.getDate() + 1);
+
+    // Parallelize ALL warden reports telemetry queries in a single concurrent batch
+    const [
+      totalRooms,
+      totalBeds,
+      occupiedBeds,
+      availableBeds,
+      maintenanceBeds,
+      bedsByTypeRaw,
+      totalComplaints,
+      complaintsByStatusRaw,
+      complaintsByCategoryRaw,
+      complaintsByPriorityRaw,
+      totalLeaves,
+      leavesByStatusRaw,
+      leavesByTypeRaw,
+      activeOutingsNow,
+      todayAttendance,
+      totalStudents,
+      totalVisitorPasses,
+      activeVisitorsOnCampus,
+    ] = await Promise.all([
       Room.countDocuments(),
       Bed.countDocuments(),
       Bed.countDocuments({ status: "OCCUPIED" }),
       Bed.countDocuments({ status: "AVAILABLE" }),
       Bed.countDocuments({ status: "MAINTENANCE" }),
+      Room.aggregate([
+        {
+          $group: {
+            _id: "$roomType",
+            count: { $sum: 1 },
+            capacity: { $sum: "$capacity" },
+            occupiedBeds: { $sum: "$occupiedBeds" },
+          },
+        },
+      ]),
+      Complaint.countDocuments(),
+      Complaint.aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }]),
+      Complaint.aggregate([{ $group: { _id: "$category", count: { $sum: 1 } } }]),
+      Complaint.aggregate([{ $group: { _id: "$priority", count: { $sum: 1 } } }]),
+      LeaveRequest.countDocuments(),
+      LeaveRequest.aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }]),
+      LeaveRequest.aggregate([{ $group: { _id: "$leaveType", count: { $sum: 1 } } }]),
+      LeaveRequest.countDocuments({
+        status: "APPROVED",
+        startDate: { $lte: now },
+        endDate: { $gte: now },
+      }),
+      Attendance.find({ date: todayStr }).lean(),
+      Student.countDocuments({ status: "ACTIVE" }),
+      VisitorPass.countDocuments({
+        visitDate: { $gte: todayStart, $lt: tomorrowStart },
+      }),
+      VisitorPass.countDocuments({ status: "CHECKED_IN" }),
     ]);
 
-    const bedsByTypeRaw = await Room.aggregate([
-      {
-        $group: {
-          _id: "$roomType",
-          count: { $sum: 1 },
-          capacity: { $sum: "$capacity" },
-          occupiedBeds: { $sum: "$occupiedBeds" },
-        },
-      },
-    ]);
     const bedsByType = bedsByTypeRaw.map((b) => ({
       roomType: b._id,
       _count: { id: b.count },
       _sum: { capacity: b.capacity, occupiedBeds: b.occupiedBeds },
     }));
-
-    // 2. Complaint Analytics
-    const totalComplaints = await Complaint.countDocuments();
-    const complaintsByStatusRaw = await Complaint.aggregate([
-      { $group: { _id: "$status", count: { $sum: 1 } } },
-    ]);
-    const complaintsByCategoryRaw = await Complaint.aggregate([
-      { $group: { _id: "$category", count: { $sum: 1 } } },
-    ]);
-    const complaintsByPriorityRaw = await Complaint.aggregate([
-      { $group: { _id: "$priority", count: { $sum: 1 } } },
-    ]);
 
     const statusMap: Record<string, number> = {};
     complaintsByStatusRaw.forEach((c) => {
@@ -61,25 +90,6 @@ export async function GET(req: NextRequest) {
 
     const resolvedCount = (statusMap["RESOLVED"] || 0) + (statusMap["CLOSED"] || 0);
     const resolutionRate = totalComplaints > 0 ? Math.round((resolvedCount / totalComplaints) * 100) : 100;
-
-    // 3. Leave Requests
-    const totalLeaves = await LeaveRequest.countDocuments();
-    const leavesByStatusRaw = await LeaveRequest.aggregate([
-      { $group: { _id: "$status", count: { $sum: 1 } } },
-    ]);
-    const leavesByTypeRaw = await LeaveRequest.aggregate([
-      { $group: { _id: "$leaveType", count: { $sum: 1 } } },
-    ]);
-
-    const activeOutingsNow = await LeaveRequest.countDocuments({
-      status: "APPROVED",
-      startDate: { $lte: now },
-      endDate: { $gte: now },
-    });
-
-    // 4. Today's Attendance
-    const todayAttendance = await Attendance.find({ date: todayStr }).lean();
-    const totalStudents = await Student.countDocuments({ status: "ACTIVE" });
 
     let presentToday = 0;
     let absentToday = 0;
@@ -96,18 +106,6 @@ export async function GET(req: NextRequest) {
     const markedCount = todayAttendance.length;
     const attendanceCompliance =
       totalStudents > 0 ? Math.round(((presentToday + lateToday + excusedToday) / totalStudents) * 100) : 100;
-
-    // 5. Visitor Activity
-    const todayStart = new Date(todayStr);
-    const tomorrowStart = new Date(todayStart);
-    tomorrowStart.setDate(tomorrowStart.getDate() + 1);
-
-    const [totalVisitorPasses, activeVisitorsOnCampus] = await Promise.all([
-      VisitorPass.countDocuments({
-        visitDate: { $gte: todayStart, $lt: tomorrowStart },
-      }),
-      VisitorPass.countDocuments({ status: "CHECKED_IN" }),
-    ]);
 
     return successResponse({
       occupancy: {

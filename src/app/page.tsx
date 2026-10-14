@@ -1,45 +1,40 @@
-"use client";
+import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
+import { jwtVerify } from "jose";
 
-import { useEffect } from "react";
-import { useRouter } from "next/navigation";
+const JWT_SECRET = new TextEncoder().encode(
+  process.env.JWT_SECRET || "hostelhub-super-secure-production-jwt-secret-key-32-chars-min"
+);
 
-export default function HomePage() {
-  const router = useRouter();
+function getHomeForRole(role: string): string {
+  switch (role) {
+    case "STUDENT":
+      return "/student/dashboard";
+    case "WARDEN":
+      return "/warden/dashboard";
+    case "ADMIN":
+    case "SUPER_ADMIN":
+      return "/admin/dashboard";
+    case "SECURITY":
+      return "/security/dashboard";
+    default:
+      return "/login";
+  }
+}
 
-  useEffect(() => {
-    // If token exists, direct to role-specific dashboard or /login
-    const token = localStorage.getItem("hostelhub_token");
-    const role = localStorage.getItem("hostelhub_role");
+export default async function HomePage() {
+  const cookieStore = await cookies();
+  const token = cookieStore.get("hostelhub_token")?.value;
 
-    if (token && role) {
-      switch (role) {
-        case "STUDENT":
-          router.replace("/student/dashboard");
-          return;
-        case "WARDEN":
-          router.replace("/warden/dashboard");
-          return;
-        case "ADMIN":
-        case "SUPER_ADMIN":
-          router.replace("/admin/dashboard");
-          return;
-        default:
-          router.replace("/login");
-          return;
-      }
-    } else {
-      router.replace("/login");
+  if (token) {
+    try {
+      const { payload } = await jwtVerify(token, JWT_SECRET);
+      const role = (payload as any).role;
+      redirect(getHomeForRole(role));
+    } catch {
+      // Fall through to /login
     }
-  }, [router]);
+  }
 
-  return (
-    <div className="flex items-center justify-center min-h-screen bg-[#F8FAFC]">
-      <div className="flex flex-col items-center gap-3">
-        <div className="w-10 h-10 border-4 border-primary/20 border-t-primary rounded-full animate-spin"></div>
-        <p className="font-heading font-semibold text-primary text-sm tracking-wide">
-          Connecting to HostelHub Platform...
-        </p>
-      </div>
-    </div>
-  );
+  redirect("/login");
 }

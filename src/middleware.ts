@@ -29,7 +29,21 @@ export async function middleware(req: NextRequest) {
 
   const tokenCookie = req.cookies.get("hostelhub_token")?.value;
 
-  // 1. If accessing /login while already authenticated, redirect to role dashboard
+  // 1. If accessing root "/", instantly redirect to role dashboard or /login
+  if (pathname === "/") {
+    if (tokenCookie) {
+      try {
+        const { payload } = await jwtVerify(tokenCookie, JWT_SECRET);
+        const role = (payload as any).role;
+        return NextResponse.redirect(new URL(getHomeForRole(role), req.url));
+      } catch (err) {
+        // Fall through
+      }
+    }
+    return NextResponse.redirect(new URL("/login", req.url));
+  }
+
+  // 2. If accessing /login while already authenticated, redirect to role dashboard
   if (pathname === "/login") {
     if (tokenCookie) {
       try {
@@ -127,6 +141,7 @@ function getHomeForRole(role: string): string {
 
 export const config = {
   matcher: [
+    "/",
     "/student/:path*",
     "/warden/:path*",
     "/admin/:path*",

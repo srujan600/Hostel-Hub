@@ -30,87 +30,124 @@ export async function GET(req: NextRequest) {
 
     const now = new Date();
 
-    // 1. Bed & Capacity Metrics
-    const totalBeds = await Bed.countDocuments();
-    const occupiedBeds = await Bed.countDocuments({ status: "OCCUPIED" });
-    const availableBeds = await Bed.countDocuments({ status: "AVAILABLE" });
-    const maintenanceBeds = await Bed.countDocuments({ status: "MAINTENANCE" });
-    const occupancyRate = totalBeds > 0 ? Math.round((occupiedBeds / totalBeds) * 100) : 0;
+    // 1. Parallelize ALL telemetry counts and hierarchy queries into a single concurrent batch
+    const [
+      totalBeds,
+      occupiedBeds,
+      availableBeds,
+      maintenanceBeds,
+      totalStudents,
+      activeStudents,
+      allocatedStudents,
+      totalStaff,
+      wardensCount,
+      securityCount,
+      adminCount,
+      openComplaints,
+      urgentComplaints,
+      pendingLeaves,
+      activeOutingsNow,
+      activeVisitorsOnCampus,
+      hostels,
+      allBlocks,
+      allFloors,
+      allRooms,
+      allBeds,
+      recentAuditLogsRaw,
+    ] = await Promise.all([
+      Bed.countDocuments(),
+      Bed.countDocuments({ status: "OCCUPIED" }),
+      Bed.countDocuments({ status: "AVAILABLE" }),
+      Bed.countDocuments({ status: "MAINTENANCE" }),
+      Student.countDocuments(),
+      Student.countDocuments({ status: "ACTIVE" }),
+      RoomAllocation.countDocuments({ status: "ACTIVE" }),
+      Staff.countDocuments({ status: "ACTIVE" }),
+      Staff.countDocuments({ role: "WARDEN", status: "ACTIVE" }),
+      Staff.countDocuments({ role: "SECURITY", status: "ACTIVE" }),
+      Staff.countDocuments({ role: "ADMIN", status: "ACTIVE" }),
+      Complaint.countDocuments({
+        status: { $in: ["SUBMITTED", "ASSIGNED", "IN_PROGRESS"] },
+      }),
+      Complaint.countDocuments({
+        priority: "URGENT",
+        status: { $in: ["SUBMITTED", "ASSIGNED", "IN_PROGRESS"] },
+      }),
+      LeaveRequest.countDocuments({ status: "SUBMITTED" }),
+      LeaveRequest.countDocuments({
+        status: "APPROVED",
+        startDate: { $lte: now },
+        endDate: { $gte: now },
+      }),
+      VisitorPass.countDocuments({
+        status: "CHECKED_IN",
+      }),
+      Hostel.find().sort({ name: 1 }).lean(),
+      Block.find().lean(),
+      Floor.find().lean(),
+      Room.find().lean(),
+      Bed.find().lean(),
+      AuditLog.find().sort({ createdAt: -1 }).limit(6).lean(),
+    ]);
 
-    // 2. Student Enrollment & Allocations
-    const totalStudents = await Student.countDocuments();
-    const activeStudents = await Student.countDocuments({ status: "ACTIVE" });
-    const allocatedStudents = await RoomAllocation.countDocuments({ status: "ACTIVE" });
+    const occupancyRate = totalBeds > 0 ? Math.round((occupiedBeds / totalBeds) * 100) : 0;
     const unallocatedStudents = Math.max(0, activeStudents - allocatedStudents);
 
-    // 3. Staff Breakdown
-    const totalStaff = await Staff.countDocuments({ status: "ACTIVE" });
-    const wardensCount = await Staff.countDocuments({ role: "WARDEN", status: "ACTIVE" });
-    const securityCount = await Staff.countDocuments({ role: "SECURITY", status: "ACTIVE" });
-    const adminCount = await Staff.countDocuments({ role: "ADMIN", status: "ACTIVE" });
-
-    // 4. Complaints & Grievance SLA
-    const totalComplaints = await Complaint.countDocuments();
-    const openComplaints = await Complaint.countDocuments({
-      status: { $in: ["SUBMITTED", "ASSIGNED", "IN_PROGRESS"] },
-    });
-    const urgentComplaints = await Complaint.countDocuments({
-      priority: "URGENT",
-      status: { $in: ["SUBMITTED", "ASSIGNED", "IN_PROGRESS"] },
+    // Index blocks, floors, rooms, and beds in memory for instant multi-hostel computation
+    const blocksByHostel = new Map<string, string[]>();
+    allBlocks.forEach((b) => {
+      const hId = String(b.hostelId);
+      if (!blocksByHostel.has(hId)) blocksByHostel.set(hId, []);
+      blocksByHostel.get(hId)!.push(String(b._id));
     });
 
-    // 5. Leave & Gate Activity
-    const pendingLeaves = await LeaveRequest.countDocuments({ status: "SUBMITTED" });
-    const activeOutingsNow = await LeaveRequest.countDocuments({
-      status: "APPROVED",
-      startDate: { $lte: now },
-      endDate: { $gte: now },
-    });
-    const activeVisitorsOnCampus = await VisitorPass.countDocuments({
-      status: "CHECKED_IN",
+    const floorsByBlock = new Map<string, string[]>();
+    allFloors.forEach((f) => {
+      const bId = String(f.blockId);
+      if (!floorsByBlock.has(bId)) floorsByBlock.set(bId, []);
+      floorsByBlock.get(bId)!.push(String(f._id));
     });
 
-    // 6. Multi-Hostel Comparison
-    const hostels = await Hostel.find().sort({ name: 1 }).lean();
+    const roomsByFloor = new Map<string, any[]>();
+    allRooms.forEach((r) => {
+      const fId = String(r.floorId);
+      if (!roomsByFloor.has(fId)) roomsByFloor.set(fId, []);
+      roomsByFloor.get(fId)!.push(r);
+    });
 
-    const hostelComparison = await Promise.all(
-      hostels.map(async (h) => {
-        const blocks = await Block.find({ hostelId: h._id }).lean();
-        const blockIds = blocks.map((b) => b._id);
+    const bedsByRoom = new Map<string, any[]>();
+    allBeds.forEach((bed) => {
+      const rId = String(bed.roomId);
+      if (!bedsByRoom.has(rId)) bedsByRoom.set(rId, []);
+      bedsByRoom.get(rId)!.push(bed);
+    });
 
-        const floors = await Floor.find({ blockId: { $in: blockIds } }).lean();
-        const floorIds = floors.map((f) => f._id);
+    const hostelComparison = hostels.map((h) => {
+      const bIds = blocksByHostel.get(String(h._id)) || [];
+      const fIds = bIds.flatMap((bId) => floorsByBlock.get(bId) || []);
+      const hRooms = fIds.flatMap((fId) => roomsByFloor.get(fId) || []);
+      const hBeds = hRooms.flatMap((r) => bedsByRoom.get(String(r._id)) || []);
 
-        const rooms = await Room.find({ floorId: { $in: floorIds } }).lean();
-        const roomIds = rooms.map((r) => r._id);
+      let hOccupied = 0;
+      hBeds.forEach((bed) => {
+        if (bed.status === "OCCUPIED") hOccupied++;
+      });
 
-        const beds = await Bed.find({ roomId: { $in: roomIds } }).lean();
+      const totalBedsCount = hBeds.length;
+      return {
+        id: h._id,
+        code: h.code,
+        name: h.name,
+        genderType: h.genderType,
+        totalBlocks: bIds.length,
+        totalRooms: hRooms.length,
+        totalBeds: totalBedsCount,
+        occupiedBeds: hOccupied,
+        availableBeds: Math.max(0, totalBedsCount - hOccupied),
+        occupancyRate: totalBedsCount > 0 ? Math.round((hOccupied / totalBedsCount) * 100) : 0,
+      };
+    });
 
-        let hOccupied = 0;
-        beds.forEach((bed) => {
-          if (bed.status === "OCCUPIED") hOccupied++;
-        });
-
-        const hBeds = beds.length;
-        const hRooms = rooms.length;
-
-        return {
-          id: h._id,
-          code: h.code,
-          name: h.name,
-          genderType: h.genderType,
-          totalBlocks: blocks.length,
-          totalRooms: hRooms,
-          totalBeds: hBeds,
-          occupiedBeds: hOccupied,
-          availableBeds: Math.max(0, hBeds - hOccupied),
-          occupancyRate: hBeds > 0 ? Math.round((hOccupied / hBeds) * 100) : 0,
-        };
-      })
-    );
-
-    // 7. Recent Audit Log Activity
-    const recentAuditLogsRaw = await AuditLog.find().sort({ createdAt: -1 }).limit(6).lean();
     const recentAuditLogs = recentAuditLogsRaw.map(sanitizeDoc);
 
     return successResponse({

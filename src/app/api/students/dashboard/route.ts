@@ -33,13 +33,55 @@ export async function GET(req: NextRequest) {
       throw new NotFoundError("Student profile not found");
     }
 
-    // 1. Current Active Allocation
-    let roomData: any = null;
-    const activeAlloc = await RoomAllocation.findOne({
-      studentId: student._id,
-      status: "ACTIVE",
-    }).lean();
+    const days = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"] as const;
+    const todayDayName = days[new Date().getDay()];
+    const todayDateStr = new Date().toISOString().split("T")[0];
 
+    // Parallel fetch allocation, complaints, leaves, notices, mess, attendance, and curfew
+    const [
+      activeAlloc,
+      [complaints, pendingComplaintsCount],
+      [leaveRequests, pendingLeaveCount],
+      notices,
+      todayMeals,
+      todayAttendance,
+      curfewSetting,
+    ] = await Promise.all([
+      RoomAllocation.findOne({
+        studentId: student._id,
+        status: "ACTIVE",
+      }).lean(),
+      Promise.all([
+        Complaint.find({ studentId: student._id }).sort({ createdAt: -1 }).limit(5).lean(),
+        Complaint.countDocuments({
+          studentId: student._id,
+          status: { $in: ["SUBMITTED", "ASSIGNED", "IN_PROGRESS"] },
+        }),
+      ]),
+      Promise.all([
+        LeaveRequest.find({ studentId: student._id }).sort({ createdAt: -1 }).limit(3).lean(),
+        LeaveRequest.countDocuments({
+          studentId: student._id,
+          status: "SUBMITTED",
+        }),
+      ]),
+      Notice.find({
+        isPublished: true,
+        targetAudience: { $in: ["ALL", "STUDENTS"] },
+      })
+        .sort({ publishDate: -1 })
+        .limit(4)
+        .lean(),
+      MessMenu.find({ dayOfWeek: todayDayName }).lean(),
+      Attendance.findOne({
+        studentId: student._id,
+        date: todayDateStr,
+      }).lean(),
+      SystemSetting.findOne({ key: "CURFEW_TIME" }).lean(),
+    ]);
+
+    // Current Active Allocation resolution
+    let roomData: any = null;
     if (activeAlloc) {
       const bed = await Bed.findById(activeAlloc.bedId).lean();
       if (bed) {
@@ -66,48 +108,6 @@ export async function GET(req: NextRequest) {
         }
       }
     }
-
-    // 2. Active Complaints
-    const [complaints, pendingComplaintsCount] = await Promise.all([
-      Complaint.find({ studentId: student._id }).sort({ createdAt: -1 }).limit(5).lean(),
-      Complaint.countDocuments({
-        studentId: student._id,
-        status: { $in: ["SUBMITTED", "ASSIGNED", "IN_PROGRESS"] },
-      }),
-    ]);
-
-    // 3. Active / Recent Leave Requests
-    const [leaveRequests, pendingLeaveCount] = await Promise.all([
-      LeaveRequest.find({ studentId: student._id }).sort({ createdAt: -1 }).limit(3).lean(),
-      LeaveRequest.countDocuments({
-        studentId: student._id,
-        status: "SUBMITTED",
-      }),
-    ]);
-
-    // 4. Latest Notices
-    const notices = await Notice.find({
-      isPublished: true,
-      targetAudience: { $in: ["ALL", "STUDENTS"] },
-    })
-      .sort({ publishDate: -1 })
-      .limit(4)
-      .lean();
-
-    // 5. Today's Mess Menu
-    const days = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"] as const;
-    const todayDayName = days[new Date().getDay()];
-    const todayMeals = await MessMenu.find({ dayOfWeek: todayDayName }).lean();
-
-    // 6. Today's Attendance
-    const todayDateStr = new Date().toISOString().split("T")[0];
-    const todayAttendance = await Attendance.findOne({
-      studentId: student._id,
-      date: todayDateStr,
-    }).lean();
-
-    // 7. System Curfew Setting
-    const curfewSetting = await SystemSetting.findOne({ key: "CURFEW_TIME" }).lean();
 
     return successResponse({
       student: {

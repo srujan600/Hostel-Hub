@@ -108,10 +108,11 @@ function LoginPageContent() {
       if (res.success && res.data) {
         localStorage.setItem("hostelhub_token", res.data.token);
         localStorage.setItem("hostelhub_role", res.data.user.role);
+        localStorage.setItem("hostelhub_user", JSON.stringify(res.data.user));
         setSuccessMessage(`Welcome back, ${res.data.user.name}. Redirecting to ${res.data.user.role.toLowerCase()} console...`);
         setTimeout(() => {
           router.push(res.data.redirectUrl);
-        }, 600);
+        }, 150);
       } else {
         setErrorMessage(res.error?.message || "Invalid credentials. Please try again.");
       }
@@ -160,10 +161,15 @@ function LoginPageContent() {
               idx === currentSlide ? "opacity-100 z-10 scale-100" : "opacity-0 z-0 scale-105"
             }`}
           >
-            {/* Background Image with Deep Gradient Wash */}
+            {/* Background Image with Deep Gradient Wash - lazy loaded to prevent network congestion */}
             <div
               className="absolute inset-0 bg-cover bg-center transition-transform duration-10000 transform scale-105"
-              style={{ backgroundImage: `url(${slide.image})` }}
+              style={{
+                backgroundImage:
+                  idx === currentSlide || idx === (currentSlide + 1) % SLIDES.length
+                    ? `url(${slide.image})`
+                    : undefined,
+              }}
             />
             <div className="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-950/60 to-slate-950/30" />
             <div className="absolute inset-0 bg-primary/20 mix-blend-multiply" />

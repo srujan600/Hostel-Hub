@@ -12,7 +12,7 @@ export async function GET(req: NextRequest) {
     await connectToDatabase();
 
     // Refresh from database to ensure up-to-date role and status
-    const user = await User.findById(session.id);
+    const user = await User.findById(session.id).lean();
 
     if (!user) {
       throw new NotFoundError("User account not found");
@@ -27,23 +27,23 @@ export async function GET(req: NextRequest) {
     let activeAllocation: any = null;
 
     if (user.role === "STUDENT") {
-      const student = await Student.findOne({ userId: user._id });
+      const student = await Student.findOne({ userId: user._id }).lean();
       if (student) {
         const alloc = await RoomAllocation.findOne({
           studentId: student._id,
           status: "ACTIVE",
-        });
+        }).lean();
 
         if (alloc) {
-          const bed = await Bed.findById(alloc.bedId);
+          const bed = await Bed.findById(alloc.bedId).lean();
           if (bed) {
-            const room = await Room.findById(bed.roomId);
+            const room = await Room.findById(bed.roomId).lean();
             if (room) {
-              const floor = await Floor.findById(room.floorId);
+              const floor = await Floor.findById(room.floorId).lean();
               if (floor) {
-                const block = await Block.findById(floor.blockId);
+                const block = await Block.findById(floor.blockId).lean();
                 if (block) {
-                  const hostel = await Hostel.findById(block.hostelId);
+                  const hostel = await Hostel.findById(block.hostelId).lean();
                   activeAllocation = {
                     allocationId: alloc._id,
                     academicYear: alloc.academicYear,
@@ -63,6 +63,7 @@ export async function GET(req: NextRequest) {
         }
 
         studentProfileData = {
+          name: student.name,
           studentId: student.studentId,
           course: student.course,
           department: student.department,
@@ -74,11 +75,11 @@ export async function GET(req: NextRequest) {
         };
       }
     } else {
-      const staff = await Staff.findOne({ userId: user._id });
+      const staff = await Staff.findOne({ userId: user._id }).lean();
       if (staff) {
         let assignedHostelData: any = null;
         if (staff.assignedHostelId) {
-          const hostel = await Hostel.findById(staff.assignedHostelId);
+          const hostel = await Hostel.findById(staff.assignedHostelId).lean();
           if (hostel) {
             assignedHostelData = {
               id: hostel._id,
@@ -89,6 +90,7 @@ export async function GET(req: NextRequest) {
         }
 
         staffProfileData = {
+          name: staff.name,
           employeeId: staff.employeeId,
           designation: staff.designation,
           phone: staff.phone,

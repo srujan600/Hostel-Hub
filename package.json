@@ -5,6 +5,7 @@
   "description": "HostelHub - Smart Hostel Management System",
   "scripts": {
     "dev": "next dev",
+    "dev:turbo": "next dev --turbopack",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
