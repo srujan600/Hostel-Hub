@@ -52,7 +52,7 @@ export function Sidebar({ role = "STUDENT", isOpen = false, onClose }: SidebarPr
 
   const wardenNav: NavItem[] = [
     { label: "Command Center", href: "/warden/dashboard", icon: <LayoutDashboard className="w-4 h-4" /> },
-    { label: "Occupancy Matrix", href: "/warden/matrix", icon: <Grid className="w-4 h-4" />, badge: "280 Beds" },
+    { label: "Occupancy Matrix", href: "/warden/matrix", icon: <Grid className="w-4 h-4" /> },
     { label: "Residents Roster", href: "/warden/residents", icon: <Users className="w-4 h-4" /> },
     { label: "Leave Adjudication", href: "/warden/leave", icon: <CalendarCheck className="w-4 h-4" />, badge: "1 Pending" },
     { label: "Complaints Desk", href: "/warden/complaints", icon: <AlertCircle className="w-4 h-4" />, badge: "2 Active" },
