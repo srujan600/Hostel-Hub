@@ -1,5 +1,15 @@
+import dns from "dns";
 import mongoose from "mongoose";
 import { logger } from "./logger";
+
+// Support SRV lookup on local machines/networks where ISP DNS refuses SRV queries
+if (typeof dns.setServers === "function") {
+  try {
+    dns.setServers(["8.8.8.8", "1.1.1.1"]);
+  } catch {
+    // Fallback silently if custom DNS setting is restricted
+  }
+}
 
 interface MongooseCache {
   conn: typeof mongoose | null;
@@ -91,7 +101,7 @@ export async function connectToDatabase(): Promise<typeof mongoose> {
       maxIdleTimeMS: 30000,
       bufferCommands: false,
       autoIndex: false, // CRITICAL: Never run index builds during runtime requests
-      ...(process.env.MONGODB_DB_NAME ? { dbName: process.env.MONGODB_DB_NAME } : {}),
+      dbName: process.env.MONGODB_DB_NAME || "hostelhub",
     };
 
     cached.promise = mongoose

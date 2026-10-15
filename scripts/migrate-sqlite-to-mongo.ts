@@ -1,3 +1,11 @@
+import dns from "dns";
+if (typeof dns.setServers === "function") {
+  try {
+    dns.setServers(["8.8.8.8", "1.1.1.1"]);
+  } catch {
+    // Fallback
+  }
+}
 import dotenv from "dotenv";
 dotenv.config();
 
